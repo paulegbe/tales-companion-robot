@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# ROS 2 build artifacts
+build/
+install/
+log/
+
+# Memory data -- personal conversation history and facts, not code
+memory_data/
+
+# Model weights -- large binary files, don't belong in git
+*.pt
+*.pth
+
+# Debug artifacts
+debug_frame.jpg
+*.txt
+
+# Environment secrets
+.env
