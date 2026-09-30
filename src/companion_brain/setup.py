@@ -27,6 +27,8 @@ setup(
             'claude_bridge_node = companion_brain.claude_bridge_node:main',
             'text_input_node = companion_brain.text_input_node:main',
              'vision_node = companion_brain.vision_node:main',
+             'tts_node = companion_brain.tts_node:main',
+             'stt_node = companion_brain.stt_node:main',
         ],
     },
 )

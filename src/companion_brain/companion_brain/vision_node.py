@@ -25,7 +25,39 @@ data_dir is safe, but be aware they don't share Python state -- e.g.
 claude_bridge_node yet. That wiring (letting you SAY "that's Paul" and
 having it apply to the most recently seen unnamed face) is a next step,
 not built in this file.
+
+CHANGES IN THIS VERSION:
+    - Identity-merge fix. Unidentified faces now get their placeholder
+      name from MemoryManager.create_unnamed_person(), which builds it
+      from the database row id. The old in-memory counter reset on every
+      launch, so the first new face after a restart was named
+      unnamed_person_1, and get_or_create_entity() returned the EXISTING
+      unnamed_person_1. A stranger's face was then attached to someone
+      already stored.
+    - Observations are throttled to one per person per minute. Logging
+      every processed frame (~3 per second) grew the observations table by
+      ~10,000 rows an hour with no new information.
+    - The terminal only logs when the detection summary changes, instead
+      of repeating the same line several times a second.
+    - Clean Ctrl+C shutdown, and the memory connection is closed on exit.
+    - Publishes /vision_people: a JSON snapshot of who is in view, with
+      entity ids, on every processed frame (even when empty, so listeners
+      can tell the data is fresh). claude_bridge_node uses it for its
+      who_is_here and name_person tools.
+
+/vision_people message format (std_msgs/String containing JSON):
+    {
+      "people": [
+        {"entity_id": 7, "name": "Paul", "known": true},
+        {"entity_id": 9, "name": "unnamed_person_9", "known": false}
+      ],
+      "faces_not_visible": 1    # people detected with no readable face
+    }
+    JSON in a String avoids a custom message package for now. A proper
+    .msg interface package is the cleaner long-term version.
 """
+
+import json
 
 import rclpy
 from rclpy.node import Node
@@ -34,6 +66,8 @@ from std_msgs.msg import String
 from cv_bridge import CvBridge
 from ultralytics import YOLO
 import face_recognition
+import time
+
 import cv2
 import numpy as np
 
@@ -68,9 +102,15 @@ class VisionNode(Node):
         self.frame_count = 0
         self.process_every_n_frames = 10
 
-        # Counter for naming unidentified people until they're named
-        # by the user -- e.g. 'unnamed_person_1', 'unnamed_person_2'.
-        self.unnamed_person_counter = 0
+        # Observation throttle: entity_id -> last time a sighting was
+        # written to memory. One observation per person per interval is
+        # enough to answer "when did I last see them".
+        self.observation_interval_s = 60.0
+        self.last_observation = {}
+
+        # Last summary printed to the terminal, so identical lines
+        # aren't repeated every processed frame.
+        self.last_summary = None
 
         self.subscription = self.create_subscription(
             Image,
@@ -85,6 +125,9 @@ class VisionNode(Node):
         # Annotated frame with bounding boxes drawn on, for visual debugging
         # via rqt_image_view -- separate from the detection summary above.
         self.annotated_publisher_ = self.create_publisher(Image, '/vision_annotated', 10)
+
+        # Structured "who is in view" snapshot for claude_bridge_node.
+        self.people_publisher_ = self.create_publisher(String, '/vision_people', 10)
 
         self.get_logger().info('Vision node ready.')
 
@@ -106,6 +149,8 @@ class VisionNode(Node):
         results = self.yolo(frame, verbose=False)
 
         detections_summary = []
+        people = {}             # entity_id -> {entity_id, name, known}
+        faces_not_visible = 0
 
         for result in results:
             for box in result.boxes:
@@ -120,7 +165,13 @@ class VisionNode(Node):
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
 
                 if class_name == 'person':
-                    label = self.identify_person(frame, x1, y1, x2, y2)
+                    label, person = self.identify_person(frame, x1, y1, x2, y2)
+                    if person is None:
+                        faces_not_visible += 1
+                    else:
+                        # Keyed by id, so one person matched twice in a
+                        # frame is still listed once.
+                        people[person['entity_id']] = person
                 else:
                     # Non-person objects: just use YOLO's label directly,
                     # no identity tracking, no memory write.
@@ -136,9 +187,20 @@ class VisionNode(Node):
         annotated_msg = self.bridge.cv2_to_imgmsg(annotated_frame, encoding='bgr8')
         self.annotated_publisher_.publish(annotated_msg)
 
+        # Publish the people snapshot every processed frame, even when
+        # empty, so the bridge can tell fresh data from a stopped node.
+        self.people_publisher_.publish(String(data=json.dumps({
+            'people': list(people.values()),
+            'faces_not_visible': faces_not_visible,
+        })))
+
         if detections_summary:
             summary_text = ', '.join(detections_summary)
-            self.get_logger().info(f'Detected: {summary_text}')
+
+            # Only print when what's in view changes.
+            if summary_text != self.last_summary:
+                self.get_logger().info(f'Detected: {summary_text}')
+                self.last_summary = summary_text
 
             out_msg = String()
             out_msg.data = summary_text
@@ -150,15 +212,20 @@ class VisionNode(Node):
         crops that region, generates a face encoding, and checks it
         against previously seen faces in memory.
 
-        Returns a human-readable label: either a known name, or
-        'someone new (unnamed_person_N)' if no match is found -- in
-        which case a new entity is created and the encoding stored
-        for future matching.
+        Returns (label, person):
+            label  : human-readable text for logs, e.g. 'Paul' or
+                     'someone new (unnamed_person_9)'
+            person : {'entity_id', 'name', 'known'} for /vision_people,
+                     or None when no face was readable
+        On no match, a new entity is created and the encoding stored for
+        future matching.
         """
         # Crop to the person's bounding box before running face detection --
         # narrows the search area and reduces false face detections
         # elsewhere in frame.
         person_crop = frame[y1:y2, x1:x2]
+        if person_crop.size == 0:
+            return 'person (face not visible)', None
 
         # face_recognition expects RGB, OpenCV gives BGR -- convert.
         rgb_crop = cv2.cvtColor(person_crop, cv2.COLOR_BGR2RGB)
@@ -167,11 +234,11 @@ class VisionNode(Node):
         if not face_locations:
             # YOLO found a person-shaped region, but no clear face in it
             # (turned away, too small, motion blur, etc.)
-            return 'person (face not visible)'
+            return 'person (face not visible)', None
 
         face_encodings = face_recognition.face_encodings(rgb_crop, face_locations)
         if not face_encodings:
-            return 'person (face not visible)'
+            return 'person (face not visible)', None
 
         # Only handling the first face found in this crop -- multiple
         # faces per person-box shouldn't normally happen since YOLO
@@ -181,35 +248,63 @@ class VisionNode(Node):
         matched_entity_id = self.memory.find_matching_face(encoding)
 
         if matched_entity_id is not None:
-            # Known face -- look up their current name and log this sighting
-            cur = self.memory.conn.cursor()
-            cur.execute('SELECT name FROM entities WHERE id=?', (matched_entity_id,))
-            row = cur.fetchone()
-            name = row[0] if row else 'unknown'
-
-            self.memory.log_observation(matched_entity_id, 'Seen (face match)')
-            return name
+            # Known face -- look up their current name and record the
+            # sighting (throttled, see log_sighting).
+            name = self.memory.get_entity_name(matched_entity_id) or 'unknown'
+            self.memory.touch_entity(matched_entity_id)
+            self.log_sighting(matched_entity_id, 'Seen (face match)')
+            return name, {
+                'entity_id': matched_entity_id,
+                'name': name,
+                'known': not name.startswith('unnamed_person_'),
+            }
 
         else:
             # New face -- create a placeholder entity and store its encoding
             # so it can be matched (and eventually named) going forward.
-            self.unnamed_person_counter += 1
-            placeholder_name = f'unnamed_person_{self.unnamed_person_counter}'
-
-            entity_id = self.memory.get_or_create_entity('person', placeholder_name)
+            # The name comes from the database row id, so it's unique
+            # even across restarts.
+            entity_id, placeholder_name = self.memory.create_unnamed_person()
             self.memory.store_face_embedding(entity_id, encoding)
-            self.memory.log_observation(entity_id, 'First sighting, unidentified')
+            self.log_sighting(entity_id, 'First sighting, unidentified', force=True)
 
-            return f'someone new ({placeholder_name})'
+            return f'someone new ({placeholder_name})', {
+                'entity_id': entity_id,
+                'name': placeholder_name,
+                'known': False,
+            }
+
+    def log_sighting(self, entity_id, description, force=False):
+        """
+        Writes an observation at most once per observation_interval_s per
+        person. force=True always writes (used for first sightings).
+        """
+        now = time.monotonic()
+        last = self.last_observation.get(entity_id)
+        if force or last is None or now - last >= self.observation_interval_s:
+            self.memory.log_observation(entity_id, description)
+            self.last_observation[entity_id] = now
+
+    def destroy_node(self):
+        """Close the memory connection before shutting down."""
+        self.memory.close()
+        super().destroy_node()
 
 
 def main(args=None):
     """Standard ROS 2 node entry point."""
     rclpy.init(args=args)
     node = VisionNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        # Ctrl+C mid-inference is the normal way to stop. Exit cleanly
+        # instead of printing a traceback and failing.
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():  # Ctrl+C may have already shut rclpy down
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

@@ -21,3 +21,27 @@ debug_frame.jpg
 
 # Environment secrets
 .env
+build/
+install/
+log/
+voices/
+*.wav
+*.bak
+gitkey*
+.env
+build/
+install/
+log/
+voices/
+*.wav
+*.bak
+gitkey*
+.env
+build/
+install/
+log/
+voices/
+*.wav
+*.bak
+gitkey*
+.env
