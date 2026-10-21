@@ -1,7 +1,8 @@
 """
 Shared pytest configuration for companion_brain tests.
 
-Registers the `ros` marker and lets the test suite run on a Mac without ROS.
+Registers the `ros` marker, puts the package on sys.path, and lets the test
+suite run on a Mac without ROS.
 
 The generated ament linter tests (copyright, flake8, pep257) import ament_*
 at module level, so on a machine without ROS they fail at collection, before
@@ -15,8 +16,17 @@ is unset. With ROS sourced, a missing linter should fail loudly, not vanish.
 
 import importlib.util
 import os
+from pathlib import Path
+import sys
 
 import pytest
+
+# Make the companion_brain package importable from the source tree, so tests
+# work on the Mac without a colcon build. Under colcon test the installed
+# package is already importable, and this source copy is the same code.
+_PKG_DIR = str(Path(__file__).resolve().parents[1])
+if _PKG_DIR not in sys.path:
+    sys.path.insert(0, _PKG_DIR)
 
 try:
     CollectReport = pytest.CollectReport

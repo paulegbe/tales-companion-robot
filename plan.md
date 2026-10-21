@@ -139,7 +139,8 @@ faster-whisper STT, Kokoro TTS (Piper fallback).
   Whisper pass).
 - Energy-gate hysteresis: `min_rms` to start a turn, `min_rms * 0.5` to continue it.
 - Params: `soft_silence_ms` 600, `hard_silence_ms` 3000, `check_tail_s` 8,
-  `continue_rms_ratio` 0.5. Old `silence_ms` removed.
+  `continue_rms_ratio` 0.5, `mute_tail_s` 0.4 (mic stays muted this long after Tales
+  stops; tune it for HDMI output, which has no echo cancellation). Old `silence_ms` removed.
 - Known limit: a pause after a complete sentence ends the turn. Follow-up if it bites:
   fragment merging in the bridge.
 
@@ -156,8 +157,10 @@ faster-whisper STT, Kokoro TTS (Piper fallback).
   | **GPU fp16, 1024 MB cap** | **0.46 to 0.52 s** | **0.20, no errors** |
 
 - Failure handling: bad sentence skipped; dead worker restarted once; then falls back to Piper.
-- Params: `engine` (kokoro/piper), `kokoro_voice` (default `af_heart`), `kokoro_speed`,
-  `kokoro_provider`, `kokoro_gpu_mem_mb` (1024).
+- Params: `engine` (kokoro/piper), `audio_device` (default `plughw:CARD=HDA,DEV=3`, HDMI),
+  `kokoro_voice` (default `af_heart`), `kokoro_speed`,
+  `kokoro_provider`, `kokoro_gpu_mem_mb` (1024), `tail_pad_s` 0.3 (trailing silence per
+  sentence; the HDMI speaker stutters the last word without it, 0.0 disables).
 - Verified working in live conversation.
 
 ### Deferred
@@ -281,22 +284,22 @@ Usable from weekend 1. Prompt tuning never fully ends; that's normal.
 |---|---|---|
 | Jetson Orin Nano Super 8GB | Compute | Running |
 | Arducam day/night USB camera | Vision | Working, `/dev/video0` |
-| reSpeaker XVF3800 4-Mic Array | Mic in + speaker out | Working. Echo cancellation lets TTS play through it without self-transcription |
-| ROADOM screen | Face display | Audio verified but unused. Face UI not built |
+| reSpeaker XVF3800 4-Mic Array | Mic in | Working. Can also play audio, with echo cancellation, but is no longer the TTS output |
+| ROADOM screen | Face display + speaker out | HDMI speaker is the primary TTS output. No echo cancellation, so stt_node relies on muting. Face UI not built |
 | Battery | Power | On hand, not wired |
 
 ### ALSA card map (always use names, never indices)
 | Name | Device | Use |
 |---|---|---|
-| `Array` | reSpeaker XVF3800 | In and out, `plughw:CARD=Array,DEV=0` |
+| `Array` | reSpeaker XVF3800 | Mic in, `plughw:CARD=Array,DEV=0` |
 | `Camera` | Arducam mic | Unused |
-| `HDA` | Jetson HDMI | Unused (was `DEV=3` to screen) |
+| `HDA` | Jetson HDMI to the ROADOM screen | Primary speaker out, `plughw:CARD=HDA,DEV=3` |
 | `APE` | Onboard audio engine | Unused |
 
 - PulseAudio masked: `systemctl --user mask pulseaudio.socket pulseaudio.service`
   (undo with `unmask`). Desktop apps have no audio; ROS nodes get exclusive device access.
 - `/etc/asound.conf` is back to original. Always pass `-D` explicitly.
-- Alias: `alias play='aplay -D plughw:CARD=Array,DEV=0'`
+- Alias: `alias play='aplay -D plughw:CARD=HDA,DEV=3'`
 
 ### ROS topics
 | Topic | Type | Publisher | Subscriber |
@@ -337,10 +340,14 @@ Never let system numpy leave 1.26.4 (breaks cv_bridge).
 ### Run commands
 ```bash
 cd ~/companion_ws && colcon build --packages-select companion_brain && source install/setup.bash   # build, THEN source
-ros2 run companion_brain tts_node --ros-args -p kokoro_voice:=af_heart
-ros2 run companion_brain stt_node --ros-args -p vad_aggressiveness:=3 -p min_rms:=<measured>
+ros2 run companion_brain tts_node --ros-args -p kokoro_voice:=af_heart -p tail_pad_s:=0.3
+ros2 run companion_brain stt_node --ros-args -p vad_aggressiveness:=3 -p min_rms:=<measured> -p mute_tail_s:=0.4
 ros2 run rqt_image_view rqt_image_view   # topics /image_raw or /vision_annotated
 ```
+- tts_node plays on HDMI by default. If Tales hears itself, use the reSpeaker, which has echo
+  cancellation: `-p audio_device:=plughw:CARD=Array,DEV=0`.
+- Write float parameters with a decimal point (`tail_pad_s:=1.0`, not `1`). In Humble an
+  integer value for a float parameter is rejected at startup.
 
 ### Key decisions
 - Claude model: `claude-sonnet-5`. Haiku was faster but ignored speech rules and confabulated.
