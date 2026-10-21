@@ -81,7 +81,7 @@ def is_interview_turn(active_at_start, active_after_bookkeeping, active_at_end):
     save_interview_debrief during the turn, still counts.
     """
     del active_at_start  # Deliberately unused; see above.
-    return active_after_bookkeeping or active_at_end
+    return bool(active_after_bookkeeping or active_at_end)
 
 
 @dataclass
