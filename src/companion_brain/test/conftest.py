@@ -17,6 +17,13 @@ import os
 
 import pytest
 
+try:
+    CollectReport = pytest.CollectReport
+except AttributeError:
+    # pytest.CollectReport became public in pytest 7. The Jetson's apt pytest
+    # (6.2 on Jammy) only has the private class, with the same constructor.
+    from _pytest.reports import CollectReport
+
 AMENT_TEST_MODULES = {
     'test_copyright.py': 'ament_copyright',
     'test_flake8.py': 'ament_flake8',
@@ -50,7 +57,7 @@ def pytest_make_collect_report(collector):
     module = AMENT_TEST_MODULES.get(filename)
     if module is None or not _should_skip(module):
         return None
-    reason = '%s not installed (no ROS). Runs under colcon test on the Jetson.' % module
+    reason = '%s not importable and AMENT_PREFIX_PATH unset (ROS not sourced)' % module
     # The skip summary unpacks longrepr as (path, lineno, reason).
     longrepr = (collector.nodeid, 0, 'Skipped: ' + reason)
-    return pytest.CollectReport(collector.nodeid, 'skipped', longrepr, [])
+    return CollectReport(collector.nodeid, 'skipped', longrepr, [])

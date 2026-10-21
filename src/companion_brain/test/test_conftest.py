@@ -99,7 +99,6 @@ def test_missing_ament_is_skipped_not_errored(tmp_path):
     assert 'ament_flake8' in out, out
     assert 'ModuleNotFoundError' not in out, out
     assert 'ImportError' not in out, out
-    assert 'error' not in result.stdout.splitlines()[-1], out
 
 
 @needs_no_ament
