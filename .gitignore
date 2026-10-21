@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 venv/
+.venv/
 
 # ROS 2 build artifacts
 build/
@@ -18,6 +19,8 @@ memory_data/
 # Debug artifacts
 debug_frame.jpg
 *.txt
+# Dependency lists are code, not artifacts
+!requirements*.txt
 
 # Environment secrets
 .env

@@ -1,4 +1,5 @@
-"""Check that package.xml parses and declares the dependencies the code imports.
+"""
+Check that package.xml parses and declares the dependencies the code imports.
 
 These tests use only the standard library so they run on a Mac without ROS.
 Source modules are scanned with ast rather than imported, because importing
