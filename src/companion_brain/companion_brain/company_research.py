@@ -165,20 +165,23 @@ class CompanyResearcher:
             # hard deadline. The SDK call cannot be interrupted, so it runs in
             # a daemon thread; on timeout its result is simply discarded.
             box = {}
+            stop = threading.Event()
             worker = threading.Thread(
-                target=lambda: box.setdefault('outcome', self._search(company, role)),
+                target=lambda: box.setdefault('outcome', self._search(company, role, stop)),
                 daemon=True,
             )
             worker.start()
             worker.join(self.deadline_s)
+            # Tell an abandoned search not to start further paid continuations.
+            stop.set()
             result, reason = box.get(
-                'outcome', (None, 'timed out after %.0fs' % self.deadline_s)
+                'outcome', (None, 'timed out after %gs' % self.deadline_s)
             )
         if result is not None:
             return result
         return self._fallback(company, role, reason)
 
-    def _search(self, company, role):
+    def _search(self, company, role, stop=None):
         """Run the web search calls. Return (ResearchResult, None) or (None, reason)."""
         messages = [{'role': 'user', 'content': _BRIEF_REQUEST.format(company=company, role=role)}]
         contents = []
@@ -193,6 +196,8 @@ class CompanyResearcher:
                 contents.append(response.content)
                 if response.stop_reason != 'pause_turn':
                     break
+                if stop is not None and stop.is_set():
+                    return None, 'stopped after deadline'
                 # Resend with the partial turn so the server picks up where it paused.
                 messages = messages + [{'role': 'assistant', 'content': response.content}]
             else:

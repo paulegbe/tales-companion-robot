@@ -420,72 +420,120 @@ def test_endless_pause_turn_is_capped():
     assert any('pause_turn' in line for line in r.logs)
 
 
-class FakeClock:
-    """Monotonic clock that moves forward a fixed step on every read."""
+class BlockingSearchClient:
+    """Fake client whose search calls block until released; fallback calls return at once.
 
-    def __init__(self, step):
-        self.now = 1000.0
-        self.step = step
+    Search calls are the ones with a tools kwarg. Each waits on an Event, so a
+    test can hold the search past the deadline without sleeping for real.
+    """
 
-    def __call__(self):
-        """Return the current time, then advance it."""
-        value = self.now
-        self.now += self.step
-        return value
+    def __init__(self, search_response, fallback_response, max_block_s=5.0):
+        self.release = threading.Event()
+        self.search_response = search_response
+        self.fallback_response = fallback_response
+        self.max_block_s = max_block_s
+        self.calls = []
+        self.lock = threading.Lock()
+        self.messages = self
+
+    def create(self, **kwargs):
+        """Block search calls until released; answer fallback calls immediately."""
+        with self.lock:
+            self.calls.append(kwargs)
+        if 'tools' in kwargs:
+            self.release.wait(self.max_block_s)
+            return self.search_response
+        return self.fallback_response
+
+    def search_calls(self):
+        """Return the recorded calls that carried tools."""
+        with self.lock:
+            return [c for c in self.calls if 'tools' in c]
+
+    def fallback_calls(self):
+        """Return the recorded calls without tools."""
+        with self.lock:
+            return [c for c in self.calls if 'tools' not in c]
 
 
-def test_deadline_zero_stops_after_first_pause(monkeypatch):
-    """Stop continuing once deadline_s is exceeded and use the partial text."""
-    monkeypatch.setattr(cr, 'time', NS(monotonic=FakeClock(step=1.0)))
-    pauses = [resp([search_ok('https://a'), text('part%d' % i)], stop='pause_turn')
-              for i in range(10)]
-    client = FakeClient(*pauses)
-    r = researcher(client, deadline_s=0)
+@pytest.fixture
+def blocking_client():
+    """Return a BlockingSearchClient and release its search calls after the test."""
+    client = BlockingSearchClient(
+        resp([search_ok('https://late'), text('Late web brief.')]),
+        resp([text('GK brief.')]),
+    )
+    yield client
+    client.release.set()
+
+
+def test_deadline_times_out_slow_search(blocking_client):
+    """Fall back without tools once the search step outlasts deadline_s."""
+    r = researcher(blocking_client, deadline_s=0.1)
+    started = time.monotonic()
     result = r.research('Acme', 'dev')
-    assert len(client.calls) == 1
-    assert result.brief == 'part0'
+    elapsed = time.monotonic() - started
+    assert elapsed < 2.0
+    assert elapsed >= 0.09
+    assert result.brief == 'GK brief.'
+    assert result.used_web is False
+    assert result.note == FALLBACK_NOTE
+    assert result.sources == []
+    assert len(blocking_client.search_calls()) == 1
+    fallback = blocking_client.fallback_calls()
+    assert len(fallback) == 1
+    assert 'tools' not in fallback[0]
+    assert any('timed out' in line for line in r.logs)
+
+
+def test_deadline_timeout_discards_late_search_result(blocking_client):
+    """Keep the fallback result even if the search finishes after the deadline."""
+    r = researcher(blocking_client, deadline_s=0.1)
+    result = r.research('Acme', 'dev')
+    blocking_client.release.set()
+    time.sleep(0.1)
+    assert result.brief == 'GK brief.'
+    assert len(blocking_client.fallback_calls()) == 1
+
+
+def test_deadline_timeout_through_get_brief(store, blocking_client):
+    """Return origin fallback for a timed out search and save nothing."""
+    r = researcher(blocking_client, deadline_s=0.1)
+    got = get_brief(store, r, 'Acme', 'dev', now=NOW)
+    assert (got.origin, got.reason, got.brief) == ('fallback', 'miss', 'GK brief.')
+    assert got.note == FALLBACK_NOTE
+    assert store.latest_brief('acme') is None
+
+
+def test_deadline_longer_than_search_gives_web_result(blocking_client):
+    """Return the normal web result when the search ends inside deadline_s."""
+    blocking_client.release.set()
+    r = researcher(blocking_client, deadline_s=5.0)
+    result = r.research('Acme', 'dev')
+    assert result.brief == 'Late web brief.'
     assert result.used_web is True
-    assert any('deadline' in line for line in r.logs)
-    assert not any('pause_turn limit' in line for line in r.logs)
+    assert result.sources == [{'url': 'https://late', 'title': 'title https://late'}]
+    assert blocking_client.fallback_calls() == []
+    assert not any('timed out' in line for line in r.logs)
 
 
-def test_deadline_not_reached_keeps_continuing(monkeypatch):
-    """Keep continuing while elapsed time is within deadline_s."""
-    monkeypatch.setattr(cr, 'time', NS(monotonic=FakeClock(step=1.0)))
+def test_deadline_with_pause_turn_continuations_inside_limit():
+    """Run pause_turn continuations in the worker when they finish in time."""
     client = FakeClient(resp([search_ok('https://a'), text('a ')], stop='pause_turn'),
                         resp([text('b')]))
-    r = researcher(client, deadline_s=100)
+    r = researcher(client, deadline_s=5.0)
     result = r.research('Acme', 'dev')
     assert len(client.calls) == 2
     assert result.brief == 'a b'
-    assert not any('deadline' in line for line in r.logs)
+    assert result.used_web is True
 
 
-def test_deadline_hit_on_second_pause(monkeypatch):
-    """Stop at the first pause that lands past the deadline."""
-    monkeypatch.setattr(cr, 'time', NS(monotonic=FakeClock(step=1.0)))
-    pauses = [resp([search_ok('https://a'), text('p%d ' % i)], stop='pause_turn')
-              for i in range(10)]
-    client = FakeClient(*pauses)
-    r = researcher(client, deadline_s=1.5, max_continuations=5)
-    result = r.research('Acme', 'dev')
-    assert len(client.calls) == 2
-    assert result.brief == 'p0 p1'
+def test_deadline_none_runs_without_thread(monkeypatch):
+    """Search inline, with no worker thread, when deadline_s is None."""
+    def no_thread(*args, **kwargs):
+        raise AssertionError('no thread expected when deadline_s is None')
 
-
-def test_deadline_does_not_apply_without_pause(monkeypatch):
-    """Ignore the deadline when the first response finishes normally."""
-    monkeypatch.setattr(cr, 'time', NS(monotonic=FakeClock(step=1000.0)))
-    client = FakeClient(resp([search_ok('https://a'), text('Whole brief.')]))
-    r = researcher(client, deadline_s=0)
-    result = r.research('Acme', 'dev')
-    assert result.brief == 'Whole brief.'
-    assert not any('deadline' in line for line in r.logs)
-
-
-def test_deadline_none_keeps_old_behavior(monkeypatch):
-    """Cap only by max_continuations when deadline_s is None."""
-    monkeypatch.setattr(cr, 'time', NS(monotonic=FakeClock(step=1e9)))
+    monkeypatch.setattr(cr, 'threading', NS(Thread=no_thread))
     pauses = [resp([search_ok('https://a'), text('p%d ' % i)], stop='pause_turn')
               for i in range(10)]
     client = FakeClient(*pauses)
@@ -494,7 +542,54 @@ def test_deadline_none_keeps_old_behavior(monkeypatch):
     result = r.research('Acme', 'dev')
     assert len(client.calls) == 3
     assert result.brief == 'p0 p1 p2'
-    assert not any('deadline' in line for line in r.logs)
+    assert result.used_web is True
+
+
+@pytest.mark.parametrize('first', [
+    resp([server_tool_use(), search_err('unavailable'), text('No luck.')]),
+    RuntimeError('503'),
+    resp([], stop='refusal'),
+    resp([search_ok('https://a')], stop='max_tokens'),
+], ids=['search_error', 'exception', 'refusal', 'max_tokens_no_text'])
+def test_internal_failure_with_deadline_falls_back_once(first):
+    """Make exactly one fallback call for internal failures when deadline_s is set."""
+    client = FakeClient(first, resp([text('GK brief.')]))
+    r = researcher(client, deadline_s=5.0)
+    result = r.research('Acme', 'dev')
+    assert len(client.calls) == 2
+    assert 'tools' in client.calls[0]
+    assert 'tools' not in client.calls[1]
+    assert result.brief == 'GK brief.'
+    assert result.used_web is False
+    assert result.note == FALLBACK_NOTE
+    assert not any('timed out' in line for line in r.logs)
+
+
+def test_fallback_timeout_kwarg_passed():
+    """Pass fallback_timeout_s as timeout= on the fallback call only."""
+    client = FakeClient(RuntimeError('down'), resp([text('GK.')]))
+    r = researcher(client, fallback_timeout_s=12.5)
+    result = r.research('Acme', 'dev')
+    assert result.brief == 'GK.'
+    assert 'timeout' not in client.calls[0]
+    assert client.calls[1]['timeout'] == 12.5
+    assert 'tools' not in client.calls[1]
+
+
+def test_fallback_timeout_none_omits_kwarg():
+    """Omit the timeout kwarg on the fallback call when fallback_timeout_s is None."""
+    client = FakeClient(RuntimeError('down'), resp([text('GK.')]))
+    r = researcher(client)
+    assert r.fallback_timeout_s is None
+    r.research('Acme', 'dev')
+    assert 'timeout' not in client.calls[1]
+
+
+def test_fallback_timeout_with_deadline_timeout(blocking_client):
+    """Pass timeout= to the fallback that follows a deadline timeout."""
+    r = researcher(blocking_client, deadline_s=0.1, fallback_timeout_s=7.0)
+    r.research('Acme', 'dev')
+    assert blocking_client.fallback_calls()[0]['timeout'] == 7.0
 
 
 def test_search_error_object_falls_back():
