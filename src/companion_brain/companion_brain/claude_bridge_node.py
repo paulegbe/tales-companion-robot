@@ -65,7 +65,9 @@ Per turn:
     4. If Claude requests tools, run them, send the results back, and stream
        the follow-up (up to MAX_TOOL_ROUNDS)
     5. Parse [FACT: key=value] tags, store them, keep them out of speech
-    6. Publish the full reply and store the turn in memory
+    6. Publish the full reply and store the turn in memory. Interview turns
+       skip both fact tags and turn storage, so roleplay never reaches
+       long-term memory
 
 Parameters:
     model             Claude model for conversation (default claude-sonnet-5)
@@ -308,12 +310,13 @@ MAX_HISTORY_INTERVIEW = 40
 RESEARCH_START_LINE = 'Give me a minute to look them up.'
 RESEARCH_SLOW_LINE = 'Still looking, almost there.'
 RESEARCH_SLOW_S = 30.0
-# Research blocks the input thread, so bound it: per call timeout, no SDK
-# retries (they would multiply the wait), and a deadline on pause_turn
-# continuations. The deadline is soft: it is checked between calls, so the
-# worst case is about two calls plus the fallback (roughly 6 minutes).
+# Research blocks the input thread, so bound it. The web search step has a
+# hard 120 s deadline for all its calls combined; past that, the brief comes
+# from general knowledge (not cached). No SDK retries, since they would
+# multiply the wait, and the fallback call gets its own short timeout.
 RESEARCH_TIMEOUT_S = 120.0
-RESEARCH_DEADLINE_S = 180.0
+RESEARCH_DEADLINE_S = 120.0
+RESEARCH_FALLBACK_TIMEOUT_S = 30.0
 
 # User turns allowed in the debrief before the session closes on its own,
 # in case save_interview_debrief never succeeds.
@@ -377,6 +380,7 @@ class ClaudeBridgeNode(Node):
             research_model,
             log=self.get_logger().info,
             deadline_s=RESEARCH_DEADLINE_S,
+            fallback_timeout_s=RESEARCH_FALLBACK_TIMEOUT_S,
         )
         self.interview = None
         self.interview_scenario = None
@@ -911,7 +915,16 @@ class ClaudeBridgeNode(Node):
             timing['api_total'] = time.monotonic() - t_api
 
             # ---- Facts, history, publish ---------------------------------
-            reply_text = self.extract_and_store_facts(' '.join(reply_parts))
+            # Roleplay stays out of long-term memory: interviewer lines quote
+            # the resume and would resurface as "similar past turns" later.
+            # A turn counts if a session was active at its start or end.
+            # Debriefs are still saved, through save_interview_debrief.
+            interview_turn = interview_before[0] is not None or self.interview is not None
+            raw_reply = ' '.join(reply_parts)
+            if interview_turn:
+                reply_text = FACT_PATTERN.sub('', raw_reply).strip()
+            else:
+                reply_text = self.extract_and_store_facts(raw_reply)
             self.conversation_history.append({'role': 'assistant', 'content': reply_text})
             self.trim_history()
 
@@ -921,7 +934,8 @@ class ClaudeBridgeNode(Node):
             self.get_logger().info(f'Claude: {reply_text}')
 
             t = time.monotonic()
-            self.memory.store_turn(user_text, reply_text)
+            if not interview_turn:
+                self.memory.store_turn(user_text, reply_text)
             timing['memory_store'] = time.monotonic() - t
 
             self.get_logger().info(

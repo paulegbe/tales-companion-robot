@@ -17,7 +17,8 @@ Research (CompanyResearcher.research):
     resent with the partial answer, a bounded number of times. Search
     failures do not raise: they come back as a web_search_tool_result whose
     content is an error object instead of a list. If no search succeeded,
-    or the call failed or was refused, a second call without tools writes
+    or the call failed, was refused, or ran past the hard deadline on the
+    whole search step, a second call without tools writes
     the brief from general knowledge. Those fallback briefs are not cached,
     so the next interview tries the web again.
 """
@@ -136,14 +137,19 @@ class CompanyResearcher:
     """Writes a company brief using Claude with server-side web search."""
 
     def __init__(self, client, model, max_continuations=3, max_tokens=16000, log=None,
-                 deadline_s=None):
-        """Store settings. deadline_s stops pause_turn continuations once exceeded."""
+                 deadline_s=None, fallback_timeout_s=None):
+        """Store settings.
+
+        deadline_s is a hard cap on the whole web search step, all calls
+        combined. fallback_timeout_s bounds the general knowledge call.
+        """
         self.client = client
         self.model = model
         self.max_continuations = max_continuations
         self.max_tokens = max_tokens
         self.log = log or (lambda msg: None)
         self.deadline_s = deadline_s
+        self.fallback_timeout_s = fallback_timeout_s
 
     @property
     def search_tool(self):
@@ -152,9 +158,30 @@ class CompanyResearcher:
 
     def research(self, company, role):
         """Return a ResearchResult. Never raises."""
+        if self.deadline_s is None:
+            result, reason = self._search(company, role)
+        else:
+            # Tales is blocked while research runs, so the search step gets a
+            # hard deadline. The SDK call cannot be interrupted, so it runs in
+            # a daemon thread; on timeout its result is simply discarded.
+            box = {}
+            worker = threading.Thread(
+                target=lambda: box.setdefault('outcome', self._search(company, role)),
+                daemon=True,
+            )
+            worker.start()
+            worker.join(self.deadline_s)
+            result, reason = box.get(
+                'outcome', (None, 'timed out after %.0fs' % self.deadline_s)
+            )
+        if result is not None:
+            return result
+        return self._fallback(company, role, reason)
+
+    def _search(self, company, role):
+        """Run the web search calls. Return (ResearchResult, None) or (None, reason)."""
         messages = [{'role': 'user', 'content': _BRIEF_REQUEST.format(company=company, role=role)}]
         contents = []
-        started = time.monotonic()
         try:
             for _ in range(self.max_continuations + 1):
                 response = self.client.messages.create(
@@ -166,48 +193,47 @@ class CompanyResearcher:
                 contents.append(response.content)
                 if response.stop_reason != 'pause_turn':
                     break
-                if self.deadline_s is not None and time.monotonic() - started > self.deadline_s:
-                    # Tales is blocked while this runs; settle for the partial answer.
-                    self.log('Research: deadline reached, using what arrived.')
-                    break
                 # Resend with the partial turn so the server picks up where it paused.
                 messages = messages + [{'role': 'assistant', 'content': response.content}]
             else:
                 self.log('Research: pause_turn limit reached, using what arrived.')
         except Exception as e:
             # Any API failure (network, rate limit, 5xx, timeout) means fallback.
-            return self._fallback(company, role, 'API error: %s' % e)
+            return None, 'API error: %s' % e
 
         if response.stop_reason == 'refusal':
-            return self._fallback(company, role, 'refusal')
+            return None, 'refusal'
 
         text = _text_of(contents)
         ok, errors, sources = _scan_searches(contents)
         if response.stop_reason == 'max_tokens':
             if not text:
-                return self._fallback(company, role, 'max_tokens with no text')
+                return None, 'max_tokens with no text'
             self.log('Research: hit max_tokens, using the partial brief.')
         if ok == 0 and errors:
-            return self._fallback(company, role, 'search errors: %s' % ', '.join(errors))
+            return None, 'search errors: %s' % ', '.join(errors)
         if not text:
-            return self._fallback(company, role, 'empty answer')
+            return None, 'empty answer'
         if ok == 0:
             # Claude answered without searching. Usable, but not web research.
-            return ResearchResult(text, [], used_web=False, note=NO_SEARCH_NOTE)
-        return ResearchResult(text, sources, used_web=True)
+            return ResearchResult(text, [], used_web=False, note=NO_SEARCH_NOTE), None
+        return ResearchResult(text, sources, used_web=True), None
 
     def _fallback(self, company, role, reason):
         """Write the brief from general knowledge, with no tools."""
         self.log('Research: falling back to general knowledge (%s).' % reason)
+        request = {
+            'model': self.model,
+            'max_tokens': self.max_tokens,
+            'messages': [{
+                'role': 'user',
+                'content': _FALLBACK_REQUEST.format(company=company, role=role),
+            }],
+        }
+        if self.fallback_timeout_s is not None:
+            request['timeout'] = self.fallback_timeout_s
         try:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                messages=[{
-                    'role': 'user',
-                    'content': _FALLBACK_REQUEST.format(company=company, role=role),
-                }],
-            )
+            response = self.client.messages.create(**request)
             text = '' if response.stop_reason == 'refusal' else _text_of([response.content])
         except Exception as e:
             self.log('Research: fallback failed too (%s).' % e)
