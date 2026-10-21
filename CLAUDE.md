@@ -36,7 +36,11 @@ Owner and tech lead: Akama. He approves plans and merges PRs. Nothing merges wit
 - Put tests in `src/companion_brain/test/` as `test_<module>.py`. Use pytest.
 - Tests must not import rclpy or anything ROS. If a test needs ROS, mark it
   `@pytest.mark.ros` so it is skipped on the Mac.
-- Run from the repo root: `python3 -m pytest src/companion_brain/test -m "not ros" -q`
+- One-time setup on the Mac, from the repo root (Python 3.10 matches the Jetson):
+  `brew install python@3.10 && python3.10 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt`
+- Run from the repo root: `.venv/bin/python -m pytest src/companion_brain/test -m "not ros" -q`
+- Without ROS, the ament linter tests (flake8, pep257, copyright) are reported as skipped.
+  They run under `colcon test` on the Jetson.
 
 ## Git
 - Never commit to `main`. Branch per issue: `issue-<number>-<short-slug>`.
