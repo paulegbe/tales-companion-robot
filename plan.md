@@ -157,7 +157,8 @@ faster-whisper STT, Kokoro TTS (Piper fallback).
   | **GPU fp16, 1024 MB cap** | **0.46 to 0.52 s** | **0.20, no errors** |
 
 - Failure handling: bad sentence skipped; dead worker restarted once; then falls back to Piper.
-- Params: `engine` (kokoro/piper), `kokoro_voice` (default `af_heart`), `kokoro_speed`,
+- Params: `engine` (kokoro/piper), `audio_device` (default `plughw:CARD=HDA,DEV=3`, HDMI),
+  `kokoro_voice` (default `af_heart`), `kokoro_speed`,
   `kokoro_provider`, `kokoro_gpu_mem_mb` (1024), `tail_pad_s` 0.3 (trailing silence per
   sentence; the HDMI speaker stutters the last word without it, 0.0 disables).
 - Verified working in live conversation.
@@ -339,10 +340,12 @@ Never let system numpy leave 1.26.4 (breaks cv_bridge).
 ### Run commands
 ```bash
 cd ~/companion_ws && colcon build --packages-select companion_brain && source install/setup.bash   # build, THEN source
-ros2 run companion_brain tts_node --ros-args -p kokoro_voice:=af_heart -p tail_pad_s:=0.3   # HDMI by default; -p audio_device:=plughw:CARD=Array,DEV=0 for the reSpeaker
+ros2 run companion_brain tts_node --ros-args -p kokoro_voice:=af_heart -p tail_pad_s:=0.3
 ros2 run companion_brain stt_node --ros-args -p vad_aggressiveness:=3 -p min_rms:=<measured> -p mute_tail_s:=0.4
 ros2 run rqt_image_view rqt_image_view   # topics /image_raw or /vision_annotated
 ```
+- tts_node plays on HDMI by default. If Tales hears itself, use the reSpeaker, which has echo
+  cancellation: `-p audio_device:=plughw:CARD=Array,DEV=0`.
 - Write float parameters with a decimal point (`tail_pad_s:=1.0`, not `1`). In Humble an
   integer value for a float parameter is rejected at startup.
 
