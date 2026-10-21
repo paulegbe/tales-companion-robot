@@ -77,6 +77,8 @@ def _run(root, ament_prefix=None):
         sys.executable, '-m', 'pytest', str(root),
         '-m', 'not ros', '-q', '-rs',
         '-p', 'no:cacheprovider',
+        # The temp dir has no setup.cfg, so repeat its anyio opt-out here.
+        '-p', 'no:anyio',
         '-W', 'error::pytest.PytestUnknownMarkWarning',
     ]
     return subprocess.run(
