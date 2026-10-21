@@ -62,25 +62,24 @@ def is_end_interview_command(text):
     return bool(_END_COMMAND.match(text or ''))
 
 
-def is_interview_turn(active_at_start, active_after_bookkeeping, active_at_end):
+def is_interview_turn(active_after_bookkeeping, active_at_end):
     """
     Return True when a turn belongs to an interview session.
 
     Interview turns stay out of long-term memory: interviewer lines quote the
-    resume and would resurface later as "similar past turns". The session
-    state is sampled three times in a turn:
+    resume and would resurface later as "similar past turns". The bridge
+    samples the session at two points in a turn:
 
-    active_at_start           a session existed when the message arrived
-    active_after_bookkeeping  still open after the end-interview pre-check
-                              and the debrief turn limit
+    active_after_bookkeeping  open after the end-interview pre-check and the
+                              debrief turn limit
     active_at_end             open after all tool rounds
 
-    Start alone does not count. If bookkeeping just closed the session (the
-    debrief turn limit, or "end interview" during the debrief), the reply is
-    ordinary chat again. A session opened by start_interview, or closed by
-    save_interview_debrief during the turn, still counts.
+    Whether a session existed when the message arrived is deliberately not an
+    input. If bookkeeping just closed the session (the debrief turn limit, or
+    "end interview" during the debrief), the reply is ordinary chat again. A
+    session opened by start_interview, or closed by save_interview_debrief
+    during the turn, still counts.
     """
-    del active_at_start  # Deliberately unused; see above.
     return bool(active_after_bookkeeping or active_at_end)
 
 

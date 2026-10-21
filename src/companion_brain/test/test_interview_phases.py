@@ -148,36 +148,26 @@ def test_every_phase_has_guidance():
         assert PHASE_GUIDANCE[phase].strip()
 
 
-# (active_at_start, active_after_bookkeeping, active_at_end, expected)
+# (active_after_bookkeeping, active_at_end, expected), one row per real turn shape.
 TURN_CASES = [
-    pytest.param(False, False, False, False, id='no_session'),
-    pytest.param(False, False, True, True, id='start_interview_turn'),
-    pytest.param(True, True, True, True, id='normal_interview_turn'),
-    pytest.param(True, True, False, True, id='debrief_saved_this_turn'),
-    pytest.param(True, True, False, True, id='end_interview_tool_during_debrief'),
-    pytest.param(True, False, False, False, id='auto_close_at_debrief_turn_limit'),
-    pytest.param(True, False, False, False, id='end_interview_said_during_debrief'),
-    pytest.param(True, False, True, True, id='closed_in_bookkeeping_then_reopened'),
-    pytest.param(False, True, False, True, id='unreachable_open_after_bookkeeping_only'),
-    pytest.param(False, True, True, True, id='unreachable_opened_before_bookkeeping'),
+    pytest.param(False, False, False, id='no_session'),
+    pytest.param(False, True, True, id='start_interview_turn'),
+    pytest.param(True, True, True, id='normal_interview_turn'),
+    pytest.param(True, False, True, id='debrief_saved_this_turn'),
+    pytest.param(True, False, True, id='end_interview_tool_during_debrief'),
+    pytest.param(False, False, False, id='auto_close_at_debrief_turn_limit'),
+    pytest.param(False, False, False, id='end_interview_said_during_debrief'),
+    pytest.param(False, True, True, id='closed_in_bookkeeping_then_reopened'),
 ]
 
 
-@pytest.mark.parametrize('at_start,after_bookkeeping,at_end,expected', TURN_CASES)
-def test_is_interview_turn(at_start, after_bookkeeping, at_end, expected):
+@pytest.mark.parametrize('after_bookkeeping,at_end,expected', TURN_CASES)
+def test_is_interview_turn(after_bookkeeping, at_end, expected):
     """Keep a turn out of long-term memory only when the session was live after bookkeeping."""
-    assert is_interview_turn(at_start, after_bookkeeping, at_end) is expected
+    assert is_interview_turn(after_bookkeeping, at_end) is expected
 
 
 def test_is_interview_turn_table_covers_all_combinations():
-    """Cover all 8 combinations of the three flags in the scenario table."""
-    combos = {tuple(p.values[:3]) for p in TURN_CASES}
-    assert len(combos) == 8
-
-
-def test_start_alone_never_counts():
-    """Return False whenever only active_at_start is set, and ignore it otherwise."""
-    assert is_interview_turn(True, False, False) is False
-    for after in (False, True):
-        for end in (False, True):
-            assert is_interview_turn(True, after, end) == is_interview_turn(False, after, end)
+    """Cover all 4 combinations of the two flags in the scenario table."""
+    combos = {tuple(p.values[:2]) for p in TURN_CASES}
+    assert len(combos) == 4

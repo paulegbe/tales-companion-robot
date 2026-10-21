@@ -920,9 +920,7 @@ class ClaudeBridgeNode(Node):
             # ---- Facts, history, publish ---------------------------------
             # Roleplay stays out of long-term memory (see is_interview_turn).
             # Debriefs are still saved, through save_interview_debrief.
-            interview_turn = is_interview_turn(
-                interview_before[0] is not None, session_active, self.interview is not None
-            )
+            interview_turn = is_interview_turn(session_active, self.interview is not None)
             raw_reply = ' '.join(reply_parts)
             if interview_turn:
                 reply_text = FACT_PATTERN.sub('', raw_reply).strip()
