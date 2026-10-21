@@ -37,7 +37,9 @@ PHASE_GUIDANCE = {
         'what they actually said. Use their resume where it fits.'
     ),
     'technical': 'Ask technical questions at the depth your persona card describes.',
-    'candidate_questions': 'Ask whether the candidate has questions for you, and answer in character.',
+    'candidate_questions': (
+        'Ask whether the candidate has questions for you, and answer in character.'
+    ),
     'close': 'Thank them, explain next steps as a real interviewer would, and say goodbye.',
     'debrief': 'Step out of character and give the debrief.',
 }
