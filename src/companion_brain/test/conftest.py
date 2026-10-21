@@ -1,4 +1,5 @@
-"""Shared pytest configuration for companion_brain tests.
+"""
+Shared pytest configuration for companion_brain tests.
 
 Registers the `ros` marker and lets the test suite run on a Mac without ROS.
 

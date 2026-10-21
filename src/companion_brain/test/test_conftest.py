@@ -1,4 +1,5 @@
-"""Tests for the ament skip logic and ros marker in conftest.py.
+"""
+Tests for the ament skip logic and ros marker in conftest.py.
 
 Each subprocess test builds a throwaway test tree in tmp_path containing a copy
 of the real conftest.py, a fake ament linter test, a plain test, and a ros test,
