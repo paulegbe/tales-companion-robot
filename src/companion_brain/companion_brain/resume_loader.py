@@ -10,13 +10,17 @@ run without resume grounding. The resume lives in data/, which is gitignored.
 
 import os
 
-from pypdf import PdfReader
+try:
+    from pypdf import PdfReader
+except ImportError:
+    # Without pypdf the bridge must still start; interviews just lack the resume.
+    PdfReader = None
 
 CACHE_NAME = 'resume.txt'
 
 
 def load_resume_text(pdf_path):
-    """Return (text, origin). origin is 'cache', 'extracted', 'missing' or 'error'."""
+    """Return (text, origin): origin is cache, extracted, missing, empty or error."""
     pdf_path = os.path.expanduser(pdf_path)
     if not os.path.isfile(pdf_path):
         return None, 'missing'
@@ -30,6 +34,8 @@ def load_resume_text(pdf_path):
     except OSError:
         pass  # Fall through and re-extract.
 
+    if PdfReader is None:
+        return None, 'error'
     try:
         reader = PdfReader(pdf_path)
         text = '\n'.join((page.extract_text() or '') for page in reader.pages).strip()
@@ -37,6 +43,10 @@ def load_resume_text(pdf_path):
         # pypdf raises many types (encrypted, malformed, truncated). Any of
         # them just means no resume for this run.
         return None, 'error'
+
+    if not text:
+        # A scanned PDF has no text layer. Do not cache an empty resume.
+        return None, 'empty'
 
     try:
         with open(cache_path, 'w', encoding='utf-8') as f:

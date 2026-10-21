@@ -44,13 +44,21 @@ PHASE_GUIDANCE = {
     'debrief': 'Step out of character and give the debrief.',
 }
 
-# Word boundaries so "extend interview" or "how did the interview end" do not match.
-_END_COMMAND = re.compile(r'\bend (the )?interview\b', re.IGNORECASE)
+# The whole utterance must be the command, with optional filler around it.
+# Matching anywhere would catch "before we end the interview, one question",
+# and the jump to the debrief cannot be undone. Other wordings are left to
+# Claude, which has the end_interview tool.
+_END_COMMAND = re.compile(
+    r"^\s*(?:(?:ok|okay|hey|tales|please|let's|lets|let us|can we|could we|"
+    r"i want to|i'd like to)[\s,]+)*"
+    r'end (?:the |this )?interview(?:[\s,]+(?:now|please|tales))*[\s.!?]*$',
+    re.IGNORECASE,
+)
 
 
 def is_end_interview_command(text):
-    """Return True when the user asked to end the interview."""
-    return bool(_END_COMMAND.search(text or ''))
+    """Return True when the whole utterance is a request to end the interview."""
+    return bool(_END_COMMAND.match(text or ''))
 
 
 @dataclass

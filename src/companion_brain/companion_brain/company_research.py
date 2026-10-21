@@ -38,6 +38,7 @@ _DYNAMIC_SEARCH_MODELS = (
 )
 
 FALLBACK_NOTE = 'Web search failed, so this brief is from general knowledge.'
+NO_SEARCH_NOTE = 'No web search was run, so this brief is from general knowledge.'
 
 _BRIEF_REQUEST = (
     'Research {company} for a candidate preparing for a {role} interview there. '
@@ -134,12 +135,15 @@ def _scan_searches(contents):
 class CompanyResearcher:
     """Writes a company brief using Claude with server-side web search."""
 
-    def __init__(self, client, model, max_continuations=3, max_tokens=16000, log=None):
+    def __init__(self, client, model, max_continuations=3, max_tokens=16000, log=None,
+                 deadline_s=None):
+        """Store settings. deadline_s stops pause_turn continuations once exceeded."""
         self.client = client
         self.model = model
         self.max_continuations = max_continuations
         self.max_tokens = max_tokens
         self.log = log or (lambda msg: None)
+        self.deadline_s = deadline_s
 
     @property
     def search_tool(self):
@@ -150,6 +154,7 @@ class CompanyResearcher:
         """Return a ResearchResult. Never raises."""
         messages = [{'role': 'user', 'content': _BRIEF_REQUEST.format(company=company, role=role)}]
         contents = []
+        started = time.monotonic()
         try:
             for _ in range(self.max_continuations + 1):
                 response = self.client.messages.create(
@@ -160,6 +165,10 @@ class CompanyResearcher:
                 )
                 contents.append(response.content)
                 if response.stop_reason != 'pause_turn':
+                    break
+                if self.deadline_s is not None and time.monotonic() - started > self.deadline_s:
+                    # Tales is blocked while this runs; settle for the partial answer.
+                    self.log('Research: deadline reached, using what arrived.')
                     break
                 # Resend with the partial turn so the server picks up where it paused.
                 messages = messages + [{'role': 'assistant', 'content': response.content}]
@@ -184,7 +193,7 @@ class CompanyResearcher:
             return self._fallback(company, role, 'empty answer')
         if ok == 0:
             # Claude answered without searching. Usable, but not web research.
-            return ResearchResult(text, [], used_web=False, note=FALLBACK_NOTE)
+            return ResearchResult(text, [], used_web=False, note=NO_SEARCH_NOTE)
         return ResearchResult(text, sources, used_web=True)
 
     def _fallback(self, company, role, reason):
