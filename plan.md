@@ -339,7 +339,7 @@ Never let system numpy leave 1.26.4 (breaks cv_bridge).
 ### Run commands
 ```bash
 cd ~/companion_ws && colcon build --packages-select companion_brain && source install/setup.bash   # build, THEN source
-ros2 run companion_brain tts_node --ros-args -p audio_device:=plughw:CARD=HDA,DEV=3 -p kokoro_voice:=af_heart -p tail_pad_s:=0.3
+ros2 run companion_brain tts_node --ros-args -p kokoro_voice:=af_heart -p tail_pad_s:=0.3   # HDMI by default; -p audio_device:=plughw:CARD=Array,DEV=0 for the reSpeaker
 ros2 run companion_brain stt_node --ros-args -p vad_aggressiveness:=3 -p min_rms:=<measured> -p mute_tail_s:=0.4
 ros2 run rqt_image_view rqt_image_view   # topics /image_raw or /vision_annotated
 ```

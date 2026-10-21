@@ -3,9 +3,9 @@ tts_node.py - Text-to-speech output node for Tales.
 
 What it does:
     Listens on /companion_speech for sentences from claude_bridge_node,
-    turns each one into speech, and plays it on audio_device. The HDMI
-    display speaker is the primary output (see plan.md's run commands); the
-    reSpeaker also works.
+    turns each one into speech, and plays it on audio_device. The default
+    is the HDMI display speaker. The reSpeaker output also works and has
+    echo cancellation (see audio_device below).
 
 Data flow:
     claude_bridge_node --(/companion_speech: String, one per sentence)
@@ -52,7 +52,12 @@ Publishes:
 
 Parameters (override with --ros-args -p name:=value):
     engine             : 'kokoro' or 'piper'.
-    audio_device       : ALSA output device, pinned by card NAME.
+    audio_device       : ALSA output device, pinned by card NAME. Default
+                         plughw:CARD=HDA,DEV=3, the HDMI display speaker,
+                         which has no echo cancellation. If Tales starts
+                         hearing itself, plughw:CARD=Array,DEV=0 (the
+                         reSpeaker) is the better choice: its echo
+                         cancellation removes TTS from the mic signal.
     voice_model        : Piper .onnx voice (its .onnx.json must sit next to it).
     kokoro_dir         : folder holding the Kokoro model, voices, and venv.
     kokoro_python      : Python inside the Kokoro venv.
@@ -217,7 +222,7 @@ class TTSNode(Node):
 
         # ---- Parameters ----------------------------------------------------
         self.declare_parameter('engine', 'kokoro')
-        self.declare_parameter('audio_device', 'plughw:CARD=Array,DEV=0')
+        self.declare_parameter('audio_device', 'plughw:CARD=HDA,DEV=3')
         self.declare_parameter(
             'voice_model',
             os.path.expanduser('~/companion_ws/voices/en_US-lessac-medium.onnx'),
