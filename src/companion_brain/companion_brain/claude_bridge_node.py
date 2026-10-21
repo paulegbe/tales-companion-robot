@@ -310,7 +310,8 @@ RESEARCH_SLOW_LINE = 'Still looking, almost there.'
 RESEARCH_SLOW_S = 30.0
 # Research blocks the input thread, so bound it: per call timeout, no SDK
 # retries (they would multiply the wait), and a deadline on pause_turn
-# continuations.
+# continuations. The deadline is soft: it is checked between calls, so the
+# worst case is about two calls plus the fallback (roughly 6 minutes).
 RESEARCH_TIMEOUT_S = 120.0
 RESEARCH_DEADLINE_S = 180.0
 
@@ -652,6 +653,8 @@ class ClaudeBridgeNode(Node):
             s.company, s.role, s.persona, score, summary.strip(), time.time()
         )
         self.get_logger().info(f'Debrief saved: score {score}')
+        # The row is committed; a failed turn must not reopen this session.
+        self.debrief_saved_this_turn = True
         self.close_interview('debrief saved')
         return 'Debrief saved. The interview session is over; you are Tales again.'
 
@@ -828,6 +831,7 @@ class ClaudeBridgeNode(Node):
         # Remember where this turn starts, so a failed turn can be rolled
         # back without leaving a dangling user message in history.
         history_len_before = len(self.conversation_history)
+        self.debrief_saved_this_turn = False
         # Interview state is rolled back with history if the turn fails.
         interview_before = (
             self.interview, copy.copy(self.interview),
@@ -933,7 +937,9 @@ class ClaudeBridgeNode(Node):
             # Roll back this turn's messages so history stays valid.
             self.conversation_history = self.conversation_history[:history_len_before]
             session, snapshot, scenario, past = interview_before
-            if session is not None:
+            if self.debrief_saved_this_turn:
+                session, scenario, past = None, None, []
+            elif session is not None:
                 # Restore the same object so phase and turn count match history.
                 session.__dict__.update(snapshot.__dict__)
             self.interview, self.interview_scenario, self.past_debriefs = session, scenario, past
