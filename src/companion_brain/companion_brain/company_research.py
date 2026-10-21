@@ -1,4 +1,5 @@
-"""Company research for interview practice, with a 30-day SQLite cache.
+"""
+Company research for interview practice, with a 30-day SQLite cache.
 
 Plain Python, no ROS imports. The Anthropic client is passed in, so tests use
 a fake client and never touch the network.
@@ -138,7 +139,8 @@ class CompanyResearcher:
 
     def __init__(self, client, model, max_continuations=3, max_tokens=16000, log=None,
                  deadline_s=None, fallback_timeout_s=None):
-        """Store settings.
+        """
+        Store settings.
 
         deadline_s is a hard cap on the whole web search step, all calls
         combined. fallback_timeout_s bounds the general knowledge call.

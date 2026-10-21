@@ -2,8 +2,6 @@
 
 from pathlib import Path
 
-import pytest
-
 from companion_brain.interview_context import (
     build_interview_block,
     compose_system_prompt,
@@ -18,6 +16,7 @@ from companion_brain.interview_phases import (
     PHASE_GUIDANCE,
     PHASES,
 )
+import pytest
 
 PKG_DIR = Path(__file__).resolve().parents[1]
 SCENARIOS_DIR = str(PKG_DIR / 'scenarios')

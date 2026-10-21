@@ -1,4 +1,5 @@
-"""SQLite storage for interview practice: company research briefs and debriefs.
+"""
+SQLite storage for interview practice: company research briefs and debriefs.
 
 Plain Python, no ROS imports. Uses the same facts.db as MemoryManager, but
 with its own connection, because memory_manager imports chromadb at module

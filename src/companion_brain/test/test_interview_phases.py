@@ -1,8 +1,5 @@
 """Tests for the interview phase machine and the end-interview command matcher."""
 
-
-import pytest
-
 from companion_brain.interview_phases import (
     DEBRIEF,
     InterviewSession,
@@ -10,6 +7,7 @@ from companion_brain.interview_phases import (
     PHASE_GUIDANCE,
     PHASES,
 )
+import pytest
 
 EXPECTED_ORDER = (
     'rapport',

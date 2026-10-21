@@ -1,4 +1,5 @@
-"""Tests for company research: normalization, tool choice, cache logic, researcher.
+"""
+Tests for company research: normalization, tool choice, cache logic, researcher.
 
 The Anthropic client is faked with SimpleNamespace responses, so nothing here
 touches the network or needs the anthropic package.
@@ -7,8 +8,6 @@ touches the network or needs the anthropic package.
 import threading
 import time
 from types import SimpleNamespace as NS
-
-import pytest
 
 from companion_brain import company_research as cr
 from companion_brain.company_research import (
@@ -23,6 +22,7 @@ from companion_brain.company_research import (
     web_search_tool_for,
 )
 from companion_brain.interview_store import InterviewStore
+import pytest
 
 DAY = 86400.0
 NOW = 1_800_000_000.0
@@ -421,7 +421,8 @@ def test_endless_pause_turn_is_capped():
 
 
 class BlockingSearchClient:
-    """Fake client whose search calls block until released; fallback calls return at once.
+    """
+    Fake client whose search calls block until released; fallback calls return at once.
 
     Search calls are the ones with a tools kwarg. Each waits on an Event, so a
     test can hold the search past the deadline without sleeping for real.

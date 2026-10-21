@@ -2,9 +2,8 @@
 
 import sqlite3
 
-import pytest
-
 from companion_brain.interview_store import InterviewStore
+import pytest
 
 
 @pytest.fixture

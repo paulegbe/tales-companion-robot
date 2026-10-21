@@ -1,4 +1,5 @@
-"""Builds the interview part of the system prompt.
+"""
+Builds the interview part of the system prompt.
 
 Plain Python, no ROS imports. The bridge calls compose_system_prompt before
 every Claude call. Outside an interview it returns the normal prompt, with

@@ -1,4 +1,5 @@
-"""Load the candidate's resume text for interview practice.
+"""
+Load the candidate's resume text for interview practice.
 
 Plain Python, no ROS imports. Extracts text from the resume PDF with pypdf
 (pure Python, no numpy) and caches it as resume.txt next to the PDF, so

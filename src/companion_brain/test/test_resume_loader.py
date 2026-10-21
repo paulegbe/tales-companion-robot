@@ -4,10 +4,9 @@ import importlib.metadata
 import os
 import re
 
-import pytest
-
 from companion_brain import resume_loader
 from companion_brain.resume_loader import CACHE_NAME, load_resume_text
+import pytest
 
 
 def make_pdf(text='Hello Resume'):
