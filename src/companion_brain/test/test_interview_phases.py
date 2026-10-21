@@ -1,0 +1,140 @@
+"""Tests for the interview phase machine and the end-interview command matcher."""
+
+from pathlib import Path
+import sys
+
+import pytest
+
+PKG_DIR = str(Path(__file__).resolve().parents[1])
+if PKG_DIR not in sys.path:
+    sys.path.insert(0, PKG_DIR)
+
+from companion_brain.interview_phases import (  # noqa: E402
+    DEBRIEF,
+    InterviewSession,
+    is_end_interview_command,
+    PHASE_GUIDANCE,
+    PHASES,
+)
+
+EXPECTED_ORDER = (
+    'rapport',
+    'setup',
+    'tell_me_about_yourself',
+    'motivation',
+    'behavioral',
+    'technical',
+    'candidate_questions',
+    'close',
+    'debrief',
+)
+
+
+def _session():
+    return InterviewSession(company='Acme', role='Junior Dev', persona='recruiter_screen')
+
+
+def test_phases_match_issue_order():
+    """Check PHASES lists the phases in the order the issue specifies."""
+    assert PHASES == EXPECTED_ORDER
+    assert DEBRIEF == 'debrief'
+
+
+def test_session_starts_at_rapport():
+    """Start a new session at rapport with zero exchanges."""
+    session = _session()
+    assert session.phase == 'rapport'
+    assert session.exchanges_in_phase == 0
+    assert not session.in_debrief
+
+
+def test_advance_visits_phases_in_exact_order():
+    """Advance one phase per call and stop with False at the debrief."""
+    session = _session()
+    visited = [session.phase]
+    while session.advance():
+        visited.append(session.phase)
+    assert tuple(visited) == EXPECTED_ORDER
+    assert session.in_debrief
+    assert session.advance() is False
+    assert session.phase == 'debrief'
+
+
+def test_advance_moves_exactly_one_step():
+    """Never skip a phase: each advance moves the index by exactly one."""
+    session = _session()
+    for i in range(len(PHASES) - 1):
+        assert session.phase_index == i
+        assert session.advance() is True
+        assert session.phase_index == i + 1
+        assert session.phase == PHASES[i + 1]
+
+
+@pytest.mark.parametrize('start', range(len(PHASES) - 1))
+def test_end_from_every_phase_lands_on_debrief(start):
+    """Jump to the debrief from any phase and never move back."""
+    session = _session()
+    for _ in range(start):
+        session.advance()
+    assert session.phase == PHASES[start]
+    session.record_user_turn()
+    assert session.end() is True
+    assert session.phase == 'debrief'
+    assert session.in_debrief
+    assert session.exchanges_in_phase == 0
+    assert session.end() is False
+    assert session.advance() is False
+    assert session.phase == 'debrief'
+
+
+def test_end_at_debrief_returns_false():
+    """Return False from end() when the session is already at the debrief."""
+    session = _session()
+    session.end()
+    assert session.end() is False
+    assert session.phase == 'debrief'
+
+
+def test_exchange_counter_increments_and_resets():
+    """Count user turns per phase and reset the count on advance."""
+    session = _session()
+    session.record_user_turn()
+    session.record_user_turn()
+    assert session.exchanges_in_phase == 2
+    session.advance()
+    assert session.exchanges_in_phase == 0
+    session.record_user_turn()
+    assert session.exchanges_in_phase == 1
+
+
+@pytest.mark.parametrize('text', [
+    'end interview',
+    'End the interview.',
+    "ok let's end interview now",
+    'END INTERVIEW',
+    'please end the interview',
+])
+def test_end_command_positives(text):
+    """Match phrases that ask to end the interview."""
+    assert is_end_interview_command(text) is True
+
+
+@pytest.mark.parametrize('text', [
+    'extend interview',
+    'how did the interview end',
+    'interview end',
+    'end interviews',
+    'the weekend interview',
+    '',
+    None,
+])
+def test_end_command_negatives(text):
+    """Reject phrases that only mention ending or interviews in passing."""
+    assert is_end_interview_command(text) is False
+
+
+def test_every_phase_has_guidance():
+    """Give every phase a non-empty guidance line and no extra keys."""
+    assert set(PHASE_GUIDANCE) == set(PHASES)
+    for phase in PHASES:
+        assert PHASE_GUIDANCE[phase].strip()
