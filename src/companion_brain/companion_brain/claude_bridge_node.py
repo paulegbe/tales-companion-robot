@@ -102,7 +102,7 @@ from companion_brain.interview_context import (
     build_interview_block, compose_system_prompt, DEFAULT_PERSONA, load_scenario, PERSONAS,
 )
 from companion_brain.interview_phases import (
-    InterviewSession, is_end_interview_command, PHASE_GUIDANCE,
+    InterviewSession, is_end_interview_command, is_interview_turn, PHASE_GUIDANCE,
 )
 from companion_brain.interview_store import InterviewStore
 from companion_brain.memory_manager import MemoryManager
@@ -866,9 +866,7 @@ class ClaudeBridgeNode(Node):
                     self.close_interview('debrief turn limit reached, not saved')
             if self.interview is not None:
                 self.interview.record_user_turn()
-            # Active after bookkeeping, not at turn start: a turn whose session
-            # was just closed (auto-close or 'end interview' in the debrief) is
-            # ordinary chat again.
+            # Sampled for is_interview_turn below.
             session_active = self.interview is not None
 
             self.conversation_history.append({'role': 'user', 'content': user_text})
@@ -920,11 +918,11 @@ class ClaudeBridgeNode(Node):
             timing['api_total'] = time.monotonic() - t_api
 
             # ---- Facts, history, publish ---------------------------------
-            # Roleplay stays out of long-term memory: interviewer lines quote
-            # the resume and would resurface as "similar past turns" later.
-            # A turn counts if a session was active after bookkeeping or at
-            # its end. Debriefs are still saved, through save_interview_debrief.
-            interview_turn = session_active or self.interview is not None
+            # Roleplay stays out of long-term memory (see is_interview_turn).
+            # Debriefs are still saved, through save_interview_debrief.
+            interview_turn = is_interview_turn(
+                interview_before[0] is not None, session_active, self.interview is not None
+            )
             raw_reply = ' '.join(reply_parts)
             if interview_turn:
                 reply_text = FACT_PATTERN.sub('', raw_reply).strip()
