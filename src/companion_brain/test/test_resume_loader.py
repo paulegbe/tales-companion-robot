@@ -2,21 +2,20 @@
 
 import importlib.metadata
 import os
-from pathlib import Path
 import re
-import sys
 
-PKG_DIR = str(Path(__file__).resolve().parents[1])
-if PKG_DIR not in sys.path:
-    sys.path.insert(0, PKG_DIR)
+import pytest
 
-from companion_brain import resume_loader  # noqa: E402
-from companion_brain.resume_loader import CACHE_NAME, load_resume_text  # noqa: E402
+from companion_brain import resume_loader
+from companion_brain.resume_loader import CACHE_NAME, load_resume_text
 
 
 def make_pdf(text='Hello Resume'):
-    """Return bytes of a one-page PDF that shows text in Helvetica."""
-    stream = ('BT /F1 12 Tf 72 712 Td (%s) Tj ET' % text).encode('latin-1')
+    """Return bytes of a one-page PDF that shows text, or a blank page if text is None."""
+    if text is None:
+        stream = b''
+    else:
+        stream = ('BT /F1 12 Tf 72 712 Td (%s) Tj ET' % text).encode('latin-1')
     objects = [
         b'<< /Type /Catalog /Pages 2 0 R >>',
         b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
@@ -46,9 +45,10 @@ def write_pdf(path, text='Hello Resume'):
     return str(path)
 
 
-def test_generated_pdf_xref_offsets_are_correct():
+@pytest.mark.parametrize('text', ['Hello Resume', None])
+def test_generated_pdf_xref_offsets_are_correct(text):
     """Point every xref entry at the start of its object."""
-    data = make_pdf()
+    data = make_pdf(text)
     xref_at = int(re.search(rb'startxref\n(\d+)', data).group(1))
     assert data[xref_at:xref_at + 4] == b'xref'
     entries = re.findall(rb'(\d{10}) 00000 n ', data[xref_at:])
@@ -133,6 +133,37 @@ def test_empty_file_is_error(tmp_path):
     bad = tmp_path / 'resume.pdf'
     bad.write_bytes(b'')
     assert load_resume_text(str(bad)) == (None, 'error')
+
+
+def test_pypdf_unavailable_is_error(tmp_path, monkeypatch):
+    """Return (None, 'error') when pypdf is not installed and there is no cache."""
+    pdf = write_pdf(tmp_path / 'resume.pdf')
+    monkeypatch.setattr(resume_loader, 'PdfReader', None)
+    assert load_resume_text(pdf) == (None, 'error')
+    assert not (tmp_path / CACHE_NAME).exists()
+
+
+def test_pypdf_unavailable_still_uses_cache(tmp_path, monkeypatch):
+    """Serve a fresh resume.txt even when pypdf is not installed."""
+    pdf = write_pdf(tmp_path / 'resume.pdf')
+    first, _ = load_resume_text(pdf)
+    monkeypatch.setattr(resume_loader, 'PdfReader', None)
+    assert load_resume_text(pdf) == (first, 'cache')
+
+
+def test_blank_pdf_is_empty_and_not_cached(tmp_path):
+    """Return (None, 'empty') for a PDF with no text layer and write no cache."""
+    pdf = write_pdf(tmp_path / 'resume.pdf', text=None)
+    assert load_resume_text(pdf) == (None, 'empty')
+    assert not (tmp_path / CACHE_NAME).exists()
+    assert load_resume_text(pdf) == (None, 'empty')
+
+
+def test_whitespace_only_pdf_is_empty(tmp_path):
+    """Treat a PDF whose only text is spaces as empty."""
+    pdf = write_pdf(tmp_path / 'resume.pdf', text='   ')
+    assert load_resume_text(pdf) == (None, 'empty')
+    assert not (tmp_path / CACHE_NAME).exists()
 
 
 def test_tilde_path_expansion(tmp_path, monkeypatch):

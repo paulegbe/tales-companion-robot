@@ -4,29 +4,25 @@ The Anthropic client is faked with SimpleNamespace responses, so nothing here
 touches the network or needs the anthropic package.
 """
 
-from pathlib import Path
-import sys
 import threading
 import time
 from types import SimpleNamespace as NS
 
 import pytest
 
-PKG_DIR = str(Path(__file__).resolve().parents[1])
-if PKG_DIR not in sys.path:
-    sys.path.insert(0, PKG_DIR)
-
-from companion_brain.company_research import (  # noqa: E402
+from companion_brain import company_research as cr
+from companion_brain.company_research import (
     CACHE_MAX_AGE_S,
     CompanyResearcher,
     FALLBACK_NOTE,
     get_brief,
     MAX_SOURCES,
+    NO_SEARCH_NOTE,
     normalize_company,
     ResearchResult,
     web_search_tool_for,
 )
-from companion_brain.interview_store import InterviewStore  # noqa: E402
+from companion_brain.interview_store import InterviewStore
 
 DAY = 86400.0
 NOW = 1_800_000_000.0
@@ -424,6 +420,83 @@ def test_endless_pause_turn_is_capped():
     assert any('pause_turn' in line for line in r.logs)
 
 
+class FakeClock:
+    """Monotonic clock that moves forward a fixed step on every read."""
+
+    def __init__(self, step):
+        self.now = 1000.0
+        self.step = step
+
+    def __call__(self):
+        """Return the current time, then advance it."""
+        value = self.now
+        self.now += self.step
+        return value
+
+
+def test_deadline_zero_stops_after_first_pause(monkeypatch):
+    """Stop continuing once deadline_s is exceeded and use the partial text."""
+    monkeypatch.setattr(cr, 'time', NS(monotonic=FakeClock(step=1.0)))
+    pauses = [resp([search_ok('https://a'), text('part%d' % i)], stop='pause_turn')
+              for i in range(10)]
+    client = FakeClient(*pauses)
+    r = researcher(client, deadline_s=0)
+    result = r.research('Acme', 'dev')
+    assert len(client.calls) == 1
+    assert result.brief == 'part0'
+    assert result.used_web is True
+    assert any('deadline' in line for line in r.logs)
+    assert not any('pause_turn limit' in line for line in r.logs)
+
+
+def test_deadline_not_reached_keeps_continuing(monkeypatch):
+    """Keep continuing while elapsed time is within deadline_s."""
+    monkeypatch.setattr(cr, 'time', NS(monotonic=FakeClock(step=1.0)))
+    client = FakeClient(resp([search_ok('https://a'), text('a ')], stop='pause_turn'),
+                        resp([text('b')]))
+    r = researcher(client, deadline_s=100)
+    result = r.research('Acme', 'dev')
+    assert len(client.calls) == 2
+    assert result.brief == 'a b'
+    assert not any('deadline' in line for line in r.logs)
+
+
+def test_deadline_hit_on_second_pause(monkeypatch):
+    """Stop at the first pause that lands past the deadline."""
+    monkeypatch.setattr(cr, 'time', NS(monotonic=FakeClock(step=1.0)))
+    pauses = [resp([search_ok('https://a'), text('p%d ' % i)], stop='pause_turn')
+              for i in range(10)]
+    client = FakeClient(*pauses)
+    r = researcher(client, deadline_s=1.5, max_continuations=5)
+    result = r.research('Acme', 'dev')
+    assert len(client.calls) == 2
+    assert result.brief == 'p0 p1'
+
+
+def test_deadline_does_not_apply_without_pause(monkeypatch):
+    """Ignore the deadline when the first response finishes normally."""
+    monkeypatch.setattr(cr, 'time', NS(monotonic=FakeClock(step=1000.0)))
+    client = FakeClient(resp([search_ok('https://a'), text('Whole brief.')]))
+    r = researcher(client, deadline_s=0)
+    result = r.research('Acme', 'dev')
+    assert result.brief == 'Whole brief.'
+    assert not any('deadline' in line for line in r.logs)
+
+
+def test_deadline_none_keeps_old_behavior(monkeypatch):
+    """Cap only by max_continuations when deadline_s is None."""
+    monkeypatch.setattr(cr, 'time', NS(monotonic=FakeClock(step=1e9)))
+    pauses = [resp([search_ok('https://a'), text('p%d ' % i)], stop='pause_turn')
+              for i in range(10)]
+    client = FakeClient(*pauses)
+    r = researcher(client, max_continuations=2)
+    assert r.deadline_s is None
+    result = r.research('Acme', 'dev')
+    assert len(client.calls) == 3
+    assert result.brief == 'p0 p1 p2'
+    assert not any('deadline' in line for line in r.logs)
+
+
 def test_search_error_object_falls_back():
     """Fall back without tools when every search returned an error object."""
     content = [server_tool_use(), search_err('unavailable'), text('I could not search.')]
@@ -531,8 +604,17 @@ def test_no_search_but_text_is_not_web():
     assert len(client.calls) == 1
     assert result.brief == 'From memory.'
     assert result.used_web is False
-    assert result.note == FALLBACK_NOTE
+    assert result.note == NO_SEARCH_NOTE
+    assert NO_SEARCH_NOTE != FALLBACK_NOTE
     assert result.sources == []
+
+
+def test_no_search_brief_is_fallback_and_not_cached(store):
+    """Return a no-search answer as fallback with NO_SEARCH_NOTE and do not cache it."""
+    client = FakeClient(resp([text('From memory.')]))
+    got = get_brief(store, researcher(client), 'Acme', 'dev', now=NOW)
+    assert (got.origin, got.note) == ('fallback', NO_SEARCH_NOTE)
+    assert store.latest_brief('acme') is None
 
 
 def test_empty_answer_with_search_falls_back():

@@ -1,15 +1,10 @@
 """Tests for interview_context: scenario cards and system prompt assembly."""
 
 from pathlib import Path
-import sys
 
 import pytest
 
-PKG_DIR = Path(__file__).resolve().parents[1]
-if str(PKG_DIR) not in sys.path:
-    sys.path.insert(0, str(PKG_DIR))
-
-from companion_brain.interview_context import (  # noqa: E402
+from companion_brain.interview_context import (
     build_interview_block,
     compose_system_prompt,
     DEBRIEF_INSTRUCTIONS,
@@ -18,12 +13,13 @@ from companion_brain.interview_context import (  # noqa: E402
     PACING_RULES,
     PERSONAS,
 )
-from companion_brain.interview_phases import (  # noqa: E402
+from companion_brain.interview_phases import (
     InterviewSession,
     PHASE_GUIDANCE,
     PHASES,
 )
 
+PKG_DIR = Path(__file__).resolve().parents[1]
 SCENARIOS_DIR = str(PKG_DIR / 'scenarios')
 RESUME = 'Jane Doe. Built a ROS robot. Python, C++.'
 BASE = 'You are Tales.'

@@ -1,16 +1,10 @@
 """Tests for InterviewStore: SQLite tables for company briefs and debriefs."""
 
-from pathlib import Path
 import sqlite3
-import sys
 
 import pytest
 
-PKG_DIR = str(Path(__file__).resolve().parents[1])
-if PKG_DIR not in sys.path:
-    sys.path.insert(0, PKG_DIR)
-
-from companion_brain.interview_store import InterviewStore  # noqa: E402
+from companion_brain.interview_store import InterviewStore
 
 
 @pytest.fixture

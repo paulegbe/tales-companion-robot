@@ -1,15 +1,9 @@
 """Tests for the interview phase machine and the end-interview command matcher."""
 
-from pathlib import Path
-import sys
 
 import pytest
 
-PKG_DIR = str(Path(__file__).resolve().parents[1])
-if PKG_DIR not in sys.path:
-    sys.path.insert(0, PKG_DIR)
-
-from companion_brain.interview_phases import (  # noqa: E402
+from companion_brain.interview_phases import (
     DEBRIEF,
     InterviewSession,
     is_end_interview_command,
@@ -113,9 +107,16 @@ def test_exchange_counter_increments_and_resets():
     "ok let's end interview now",
     'END INTERVIEW',
     'please end the interview',
+    'Tales, end the interview please',
+    'END INTERVIEW!',
+    'could we end this interview',
+    '  okay, lets end the interview now.  ',
+    'hey tales, can we end interview?',
+    "i'd like to end the interview",
+    'end interview, tales',
 ])
 def test_end_command_positives(text):
-    """Match phrases that ask to end the interview."""
+    """Match utterances that are only the end command plus filler."""
     assert is_end_interview_command(text) is True
 
 
@@ -125,11 +126,19 @@ def test_end_command_positives(text):
     'interview end',
     'end interviews',
     'the weekend interview',
+    'before we end the interview, I have a question',
+    "don't end the interview",
+    'can you end the interview and then tell me',
+    'I think we should end the interview',
+    'end the interview later',
+    'end the meeting',
+    'end',
+    '   ',
     '',
     None,
 ])
 def test_end_command_negatives(text):
-    """Reject phrases that only mention ending or interviews in passing."""
+    """Reject utterances that mention ending the interview inside a longer sentence."""
     assert is_end_interview_command(text) is False
 
 
