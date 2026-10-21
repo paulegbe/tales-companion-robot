@@ -1,3 +1,5 @@
+from glob import glob
+
 from setuptools import find_packages, setup
 
 package_name = 'companion_brain'
@@ -10,6 +12,8 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        # Interview persona cards, read at runtime by claude_bridge_node.
+        ('share/' + package_name + '/scenarios', glob('scenarios/*.md')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

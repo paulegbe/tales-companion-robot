@@ -120,7 +120,7 @@ faster-whisper STT, Kokoro TTS (Piper fallback).
 ### Nodes
 | Node | Role |
 |---|---|
-| `claude_bridge_node` | Streams Claude replies sentence by sentence. Tools: snapshot, who_is_here, name_person, remember_fact, forget_fact. MultiThreadedExecutor |
+| `claude_bridge_node` | Streams Claude replies sentence by sentence. Tools: snapshot, who_is_here, name_person, remember_fact, forget_fact, plus interview practice (start_interview, interview_advance, end_interview, save_interview_debrief, refresh_company_research). MultiThreadedExecutor |
 | `stt_node` | faster-whisper `base.en` + webrtcvad + energy gate + smart endpointing |
 | `tts_node` | Kokoro on GPU via `kokoro_worker.py`, Piper fallback, pipelined synth/playback |
 | `vision_node` | YOLOv8 + face recognition, publishes `/vision_people` |

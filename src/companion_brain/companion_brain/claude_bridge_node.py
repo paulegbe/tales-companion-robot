@@ -44,23 +44,49 @@ What changed in this version (speed pass):
        call is structured, always logged, and can't be faked. Tag parsing
        is kept as a fallback.
    11. CLEAN SHUTDOWN. Ctrl+C no longer ends in an RCLError traceback.
+   12. INTERVIEW PRACTICE. "Tales, do a recruiter screen for <company>,
+       <role>" makes Claude call start_interview. The bridge looks up a
+       cached company brief (SQLite, 30 days) or researches the company
+       with server-side web search, then Claude role-plays a phased
+       interview grounded in the resume and ends with an out-of-character
+       debrief that is saved. Logic lives in plain modules:
+       interview_phases, interview_context, company_research,
+       interview_store, resume_loader. Tools: start_interview,
+       interview_advance, end_interview, save_interview_debrief,
+       refresh_company_research.
 
 Per turn:
     1. Pull relevant memory context (facts + similar past turns)
-    2. Stream Claude's reply, publishing each finished sentence
-    3. If Claude requests tools (snapshot, who_is_here, name_person), run
-       them, send the results back, and stream the follow-up
-       (up to MAX_TOOL_ROUNDS)
-    4. Parse [FACT: key=value] tags, store them, keep them out of speech
-    5. Publish the full reply and store the turn in memory
+    2. In an interview: "end interview" jumps to the debrief; the turn is
+       counted for the current phase
+    3. Stream Claude's reply, publishing each finished sentence. The system
+       prompt is rebuilt every round, so a phase change made by a tool shows
+       up in the follow-up
+    4. If Claude requests tools, run them, send the results back, and stream
+       the follow-up (up to MAX_TOOL_ROUNDS)
+    5. Parse [FACT: key=value] tags, store them, keep them out of speech
+    6. Publish the full reply and store the turn in memory. Interview turns
+       skip both fact tags and turn storage, so roleplay never reaches
+       long-term memory
+
+Parameters:
+    model             Claude model for conversation (default claude-sonnet-5)
+    max_tokens        reply cap per call (default 500)
+    people_stale_s    max age of /vision_people data (default 3.0)
+    resume_path       resume PDF (default ~/companion_ws/data/resume.pdf)
+    research_model    model for company research ('' means use model)
+    scenarios_dir     persona cards ('' means the installed share directory)
+    debrief_max_tokens reply cap during the debrief phase (default 1200)
 """
 
 import base64
+import copy
 import json
 import os
 import re
 import time
 
+from ament_index_python.packages import get_package_share_directory
 import anthropic
 import cv2
 import rclpy
@@ -71,7 +97,16 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
+from companion_brain.company_research import CompanyResearcher, get_brief, normalize_company
+from companion_brain.interview_context import (
+    build_interview_block, compose_system_prompt, DEFAULT_PERSONA, load_scenario, PERSONAS,
+)
+from companion_brain.interview_phases import (
+    InterviewSession, is_end_interview_command, is_interview_turn, PHASE_GUIDANCE,
+)
+from companion_brain.interview_store import InterviewStore
 from companion_brain.memory_manager import MemoryManager
+from companion_brain.resume_loader import load_resume_text
 
 
 # Tool definition Claude sees on every call. Claude decides on its own,
@@ -173,17 +208,119 @@ FORGET_FACT_TOOL = {
     },
 }
 
+START_INTERVIEW_TOOL = {
+    "name": "start_interview",
+    "description": (
+        "Starts a spoken mock interview practice session, for example when the "
+        "user says 'do a recruiter screen for Acme, junior Python developer'. "
+        "Call it right away without saying anything first: Tales announces the "
+        "company lookup itself if research is needed. After it returns, begin "
+        "in character with the rapport phase."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "company": {"type": "string", "description": "Company name as the user said it."},
+            "role": {"type": "string", "description": "The role being interviewed for."},
+            "persona": {
+                "type": "string",
+                "enum": list(PERSONAS),
+                "description": (
+                    "Interviewer type. recruiter_screen unless the user asks for a "
+                    "hiring manager, technical, or behavioral interview."
+                ),
+            },
+        },
+        "required": ["company", "role"],
+    },
+}
+
+INTERVIEW_ADVANCE_TOOL = {
+    "name": "interview_advance",
+    "description": (
+        "Moves the interview to the next phase. Call it when the current phase's "
+        "goal is met, before starting the next phase. Phases only move forward one "
+        "step at a time."
+    ),
+    "input_schema": {"type": "object", "properties": {}, "required": []},
+}
+
+END_INTERVIEW_TOOL = {
+    "name": "end_interview",
+    "description": (
+        "Ends the interview early and jumps to the debrief. Use when the user "
+        "asks to stop or end the interview in any wording."
+    ),
+    "input_schema": {"type": "object", "properties": {}, "required": []},
+}
+
+SAVE_DEBRIEF_TOOL = {
+    "name": "save_interview_debrief",
+    "description": (
+        "Saves the debrief after you have spoken it, so future practice sessions "
+        "can target weak spots. Only valid in the debrief phase. Ends the session."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "score": {"type": "integer", "description": "Overall score from 1 to 10."},
+            "summary": {
+                "type": "string",
+                "description": "Two or three sentences: weakest areas and what to practice.",
+            },
+        },
+        "required": ["score", "summary"],
+    },
+}
+
+REFRESH_RESEARCH_TOOL = {
+    "name": "refresh_company_research",
+    "description": (
+        "Forces fresh web research on a company for interview practice, ignoring "
+        "the cache. Use when the user says 'refresh research on <company>'. Call it "
+        "without saying anything first."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "company": {"type": "string", "description": "Company name."},
+            "role": {"type": "string", "description": "Role, if known."},
+        },
+        "required": ["company"],
+    },
+}
+
 TOOLS = [
     VISION_TOOL, WHO_IS_HERE_TOOL, NAME_PERSON_TOOL,
     REMEMBER_FACT_TOOL, FORGET_FACT_TOOL,
+    START_INTERVIEW_TOOL, INTERVIEW_ADVANCE_TOOL, END_INTERVIEW_TOOL,
+    SAVE_DEBRIEF_TOOL, REFRESH_RESEARCH_TOOL,
 ]
 
 # Max tool calls in one turn. Stops a runaway loop if Claude keeps asking
 # to look.
 MAX_TOOL_ROUNDS = 3
 
-# Max messages kept in conversation history.
+# Max messages kept in conversation history. An interview runs longer and
+# follow-ups need earlier answers, so it gets a larger window.
 MAX_HISTORY = 20
+MAX_HISTORY_INTERVIEW = 40
+
+# Spoken while research runs, so Tales is not silent for a minute.
+RESEARCH_START_LINE = 'Give me a minute to look them up.'
+RESEARCH_SLOW_LINE = 'Still looking, almost there.'
+RESEARCH_SLOW_S = 30.0
+# Research blocks the input thread, so bound it. The web search step has a
+# hard 120 s deadline for all its calls combined; past that, the brief comes
+# from general knowledge (not cached). No SDK retries, since they would
+# multiply the wait, and the fallback call gets its own short timeout.
+RESEARCH_TIMEOUT_S = 120.0
+RESEARCH_DEADLINE_S = 120.0
+RESEARCH_FALLBACK_TIMEOUT_S = 30.0
+
+# User turns allowed in the debrief before the session closes on its own,
+# in case save_interview_debrief never succeeds.
+DEBRIEF_MAX_TURNS = 3
 
 # [FACT: key=value] tags Claude embeds to save facts.
 FACT_PATTERN = re.compile(r'\[FACT:\s*([^=\]]+)=([^\]]+)\]')
@@ -210,11 +347,45 @@ class ClaudeBridgeNode(Node):
         self.model = self.get_parameter('model').value
         self.max_tokens = self.get_parameter('max_tokens').value
         self.people_stale_s = self.get_parameter('people_stale_s').value
+        self.declare_parameter('resume_path', '~/companion_ws/data/resume.pdf')
+        self.declare_parameter('research_model', '')
+        self.declare_parameter('scenarios_dir', '')
+        self.declare_parameter('debrief_max_tokens', 1200)
+        self.debrief_max_tokens = self.get_parameter('debrief_max_tokens').value
+        research_model = self.get_parameter('research_model').value or self.model
+        self.scenarios_dir = (
+            self.get_parameter('scenarios_dir').value
+            or os.path.join(get_package_share_directory('companion_brain'), 'scenarios')
+        )
 
         self.client = anthropic.Anthropic()
         self.conversation_history = []
         self.system_prompt = self.load_personality()
         self.memory = MemoryManager()
+
+        # ---- Interview practice --------------------------------------------
+        # Resume text is loaded once here, but only enters the system prompt
+        # while an interview session is active.
+        resume_path = self.get_parameter('resume_path').value
+        self.resume_text, origin = load_resume_text(resume_path)
+        if self.resume_text:
+            self.get_logger().info(f'Resume loaded: {len(self.resume_text)} chars ({origin}).')
+        else:
+            self.get_logger().warn(
+                f'No resume ({origin}) at {resume_path}. Interviews run without it.'
+            )
+        self.interview_store = InterviewStore(self.memory.db_path)
+        self.researcher = CompanyResearcher(
+            self.client.with_options(timeout=RESEARCH_TIMEOUT_S, max_retries=0),
+            research_model,
+            log=self.get_logger().info,
+            deadline_s=RESEARCH_DEADLINE_S,
+            fallback_timeout_s=RESEARCH_FALLBACK_TIMEOUT_S,
+        )
+        self.interview = None
+        self.interview_scenario = None
+        self.past_debriefs = []
+        self.debrief_saved_this_turn = False
 
         # Warm up ChromaDB's embedding model now, so the first real
         # message doesn't pay the ~1.5 s model-load cost.
@@ -262,7 +433,8 @@ class ClaudeBridgeNode(Node):
 
         self.get_logger().info(
             f'Claude bridge node ready (model: {self.model}, '
-            'tools: snapshot, who_is_here, name_person, remember_fact, forget_fact).'
+            'tools: snapshot, who_is_here, name_person, remember_fact, forget_fact, '
+            f'interview practice; research model: {research_model}).'
         )
 
     # ------------------------------------------------------------------------
@@ -371,6 +543,137 @@ class ClaudeBridgeNode(Node):
         self.get_logger().info(f'Named entity {entity_id}: {current} -> {name}')
         return f'Done. You will recognize {name} from now on.'
 
+    def close_interview(self, why):
+        """End the session and drop its prompt context."""
+        self.get_logger().info(f'Interview closed: {why}')
+        self.interview = None
+        self.interview_scenario = None
+        self.past_debriefs = []
+
+    def interview_block(self):
+        """Return the interview section of the system prompt, or None outside a session."""
+        if self.interview is None:
+            return None
+        return build_interview_block(
+            self.interview, self.interview_scenario, self.resume_text, self.past_debriefs
+        )
+
+    def research_company(self, company, role, force_refresh=False):
+        """Get a company brief from cache or research, speaking while it runs."""
+        key = normalize_company(company)
+        result = get_brief(
+            self.interview_store, self.researcher, company, role,
+            force_refresh=force_refresh,
+            on_research_start=lambda: self.speak(RESEARCH_START_LINE),
+            slow_notice_s=RESEARCH_SLOW_S,
+            on_slow=lambda: self.speak(RESEARCH_SLOW_LINE),
+        )
+        if result.origin == 'cache':
+            self.get_logger().info(
+                f"Research: cache hit for '{key}' (age {result.age_s / 86400:.1f}d)"
+            )
+        elif result.origin == 'web':
+            self.get_logger().info(
+                f"Research: cache {result.reason} for '{key}', searched web "
+                f"(model {self.researcher.model}, tool {self.researcher.search_tool['type']}); "
+                f'stored brief, {len(result.sources)} sources'
+            )
+        else:
+            self.get_logger().warn(
+                f"Research: cache {result.reason} for '{key}', web search failed; "
+                'using general knowledge, not cached'
+            )
+        return result
+
+    def research_status_line(self, result):
+        """Tell Claude where the brief came from and what to say about it."""
+        if result.origin == 'fallback':
+            if not result.brief:
+                return ('Research failed and no brief is available. Tell the user that in '
+                        'one sentence, then continue from what you know.')
+            return f'{result.note} Tell the user that in one sentence.'
+        if result.origin == 'cache':
+            return f'Brief came from the cache ({result.age_s / 86400:.0f} days old).'
+        return f'Fresh web research, {len(result.sources)} sources.'
+
+    def tool_start_interview(self, company, role, persona):
+        """start_interview: research the company and open a session."""
+        company, role = company.strip(), role.strip()
+        persona = persona or DEFAULT_PERSONA
+        if not company or not role:
+            return 'Company and role are both required. Ask the user for the missing one.'
+        if self.interview is not None:
+            return (f'An interview for {self.interview.company} is already running. '
+                    'Ask the user whether to end it first (end_interview).')
+        scenario = load_scenario(persona, self.scenarios_dir)  # ValueError if unknown
+        result = self.research_company(company, role)
+        self.interview = InterviewSession(
+            company, role, persona, brief=result.brief, brief_note=result.note,
+        )
+        self.interview_scenario = scenario
+        self.past_debriefs = self.interview_store.recent_debriefs(3)
+        self.get_logger().info(f'Interview started: {company}, {role}, {persona}')
+        return (
+            f'Interview session started ({persona}). {self.research_status_line(result)} '
+            'Now begin in character with the rapport phase. Do not repeat the lookup line.'
+        )
+
+    def tool_interview_advance(self):
+        """interview_advance: move one phase forward."""
+        if self.interview is None:
+            return 'No interview is running.'
+        before = self.interview.phase
+        if not self.interview.advance():
+            return 'Already in the debrief. Give it, then call save_interview_debrief.'
+        self.get_logger().info(f'Interview phase: {before} -> {self.interview.phase}')
+        return f'Now in phase {self.interview.phase}: {PHASE_GUIDANCE[self.interview.phase]}'
+
+    def tool_end_interview(self):
+        """end_interview: jump straight to the debrief."""
+        if self.interview is None:
+            return 'No interview is running.'
+        if self.interview.in_debrief:
+            # Second end request: leave without saving rather than get stuck.
+            self.close_interview('ended during debrief, not saved')
+            return 'Interview session closed without saving a debrief. You are Tales again.'
+        before = self.interview.phase
+        self.interview.end()
+        self.get_logger().info(f'Interview phase: {before} -> debrief (ended early)')
+        return 'Interview ended. Step out of character now and give the debrief.'
+
+    def tool_save_debrief(self, score, summary):
+        """save_interview_debrief: store the debrief and close the session."""
+        if self.interview is None:
+            return 'No interview is running. Nothing saved.'
+        if not self.interview.in_debrief:
+            return 'Not in the debrief yet. Call end_interview or finish the phases first.'
+        try:
+            score = int(score)
+        except (TypeError, ValueError):
+            score = 0
+        if not 1 <= score <= 10:
+            return 'Score must be a whole number from 1 to 10. Call again with a valid score.'
+        s = self.interview
+        self.interview_store.save_debrief(
+            s.company, s.role, s.persona, score, summary.strip(), time.time()
+        )
+        self.get_logger().info(f'Debrief saved: score {score}')
+        # The row is committed; a failed turn must not reopen this session.
+        self.debrief_saved_this_turn = True
+        self.close_interview('debrief saved')
+        return 'Debrief saved. The interview session is over; you are Tales again.'
+
+    def tool_refresh_research(self, company, role):
+        """refresh_company_research: force new research and update a live session."""
+        company = company.strip()
+        if not company:
+            return 'No company given.'
+        result = self.research_company(company, role.strip(), force_refresh=True)
+        s = self.interview
+        if s is not None and normalize_company(s.company) == normalize_company(company):
+            s.brief, s.brief_note = result.brief, result.note
+        return f'Research refreshed for {company}. {self.research_status_line(result)}'
+
     def execute_tool(self, block):
         """Run one tool_use block and return its tool_result content."""
         self.get_logger().info(f'Tool: {block.name} {block.input or ""}')
@@ -399,6 +702,23 @@ class ClaudeBridgeNode(Node):
                 return self.tool_name_person(
                     int(block.input['entity_id']), str(block.input['name'])
                 )
+            if block.name == 'start_interview':
+                return self.tool_start_interview(
+                    str(block.input['company']), str(block.input['role']),
+                    block.input.get('persona'),
+                )
+            if block.name == 'interview_advance':
+                return self.tool_interview_advance()
+            if block.name == 'end_interview':
+                return self.tool_end_interview()
+            if block.name == 'save_interview_debrief':
+                return self.tool_save_debrief(
+                    block.input['score'], str(block.input['summary'])
+                )
+            if block.name == 'refresh_company_research':
+                return self.tool_refresh_research(
+                    str(block.input['company']), str(block.input.get('role') or '')
+                )
             return f'Unknown tool: {block.name}'
         except Exception as e:
             # Report the failure to Claude instead of crashing the turn.
@@ -410,7 +730,8 @@ class ClaudeBridgeNode(Node):
     # ------------------------------------------------------------------------
 
     def destroy_node(self):
-        """Close the memory connection before shutting down."""
+        """Close the database connections before shutting down."""
+        self.interview_store.close()
         self.memory.close()
         super().destroy_node()
 
@@ -444,9 +765,10 @@ class ClaudeBridgeNode(Node):
         drop messages until the first one is a user message with plain
         text content.
         """
-        if len(self.conversation_history) <= MAX_HISTORY:
+        limit = MAX_HISTORY_INTERVIEW if self.interview is not None else MAX_HISTORY
+        if len(self.conversation_history) <= limit:
             return
-        trimmed = self.conversation_history[-MAX_HISTORY:]
+        trimmed = self.conversation_history[-limit:]
         while trimmed and not (
             trimmed[0]['role'] == 'user' and isinstance(trimmed[0]['content'], str)
         ):
@@ -457,7 +779,7 @@ class ClaudeBridgeNode(Node):
     # Streaming
     # ------------------------------------------------------------------------
 
-    def stream_reply(self, system_prompt, turn_start, timing):
+    def stream_reply(self, system_prompt, max_tokens, turn_start, timing):
         """
         Stream one Claude response. Publish each sentence as it completes.
         Returns the final message object (for stop_reason and tool blocks).
@@ -465,7 +787,7 @@ class ClaudeBridgeNode(Node):
         buffer = ''
         with self.client.messages.stream(
             model=self.model,
-            max_tokens=self.max_tokens,
+            max_tokens=max_tokens,
             system=system_prompt,
             tools=TOOLS,
             messages=self.conversation_history,
@@ -514,6 +836,12 @@ class ClaudeBridgeNode(Node):
         # Remember where this turn starts, so a failed turn can be rolled
         # back without leaving a dangling user message in history.
         history_len_before = len(self.conversation_history)
+        self.debrief_saved_this_turn = False
+        # Interview state is rolled back with history if the turn fails.
+        interview_before = (
+            self.interview, copy.copy(self.interview),
+            self.interview_scenario, self.past_debriefs,
+        )
 
         try:
             # ---- Memory context ------------------------------------------
@@ -521,17 +849,45 @@ class ClaudeBridgeNode(Node):
             context_block = self.memory.build_context_block(user_text)
             timing['memory_lookup'] = time.monotonic() - t
 
-            system_prompt = self.system_prompt
-            if context_block:
-                system_prompt += '\n\n' + context_block
+            # ---- Interview bookkeeping -----------------------------------
+            # "end interview" is checked here as well as offered as a tool,
+            # so the plain phrase always works even if Claude misses it.
+            if self.interview is not None:
+                if is_end_interview_command(user_text):
+                    if self.interview.in_debrief:
+                        self.close_interview('user said end interview during debrief')
+                    else:
+                        self.interview.end()
+                        self.get_logger().info(
+                            'Interview phase: -> debrief (user said end interview)'
+                        )
+                elif (self.interview.in_debrief
+                      and self.interview.exchanges_in_phase >= DEBRIEF_MAX_TURNS):
+                    self.close_interview('debrief turn limit reached, not saved')
+            if self.interview is not None:
+                self.interview.record_user_turn()
+            # Sampled for is_interview_turn below.
+            session_active = self.interview is not None
 
             self.conversation_history.append({'role': 'user', 'content': user_text})
 
             # ---- Stream, handling tool rounds ----------------------------
             t_api = time.monotonic()
             reply_parts = []
+            debrief_turn = False
             for _ in range(MAX_TOOL_ROUNDS + 1):
-                response = self.stream_reply(system_prompt, turn_start, timing)
+                # Once a turn reaches the debrief, keep the larger cap for the
+                # rest of it, even if save_interview_debrief closes the session.
+                debrief_turn = debrief_turn or (
+                    self.interview is not None and self.interview.in_debrief
+                )
+                max_tokens = self.debrief_max_tokens if debrief_turn else self.max_tokens
+                # Rebuilt every round: a tool may have started an interview
+                # or changed its phase since the last round.
+                system_prompt = compose_system_prompt(
+                    self.system_prompt, context_block, self.interview_block()
+                )
+                response = self.stream_reply(system_prompt, max_tokens, turn_start, timing)
 
                 # Keep any text Claude said this round (e.g. "Let me look.")
                 reply_parts.extend(
@@ -562,7 +918,14 @@ class ClaudeBridgeNode(Node):
             timing['api_total'] = time.monotonic() - t_api
 
             # ---- Facts, history, publish ---------------------------------
-            reply_text = self.extract_and_store_facts(' '.join(reply_parts))
+            # Roleplay stays out of long-term memory (see is_interview_turn).
+            # Debriefs are still saved, through save_interview_debrief.
+            interview_turn = is_interview_turn(session_active, self.interview is not None)
+            raw_reply = ' '.join(reply_parts)
+            if interview_turn:
+                reply_text = FACT_PATTERN.sub('', raw_reply).strip()
+            else:
+                reply_text = self.extract_and_store_facts(raw_reply)
             self.conversation_history.append({'role': 'assistant', 'content': reply_text})
             self.trim_history()
 
@@ -572,7 +935,8 @@ class ClaudeBridgeNode(Node):
             self.get_logger().info(f'Claude: {reply_text}')
 
             t = time.monotonic()
-            self.memory.store_turn(user_text, reply_text)
+            if not interview_turn:
+                self.memory.store_turn(user_text, reply_text)
             timing['memory_store'] = time.monotonic() - t
 
             self.get_logger().info(
@@ -587,6 +951,13 @@ class ClaudeBridgeNode(Node):
         except Exception as e:
             # Roll back this turn's messages so history stays valid.
             self.conversation_history = self.conversation_history[:history_len_before]
+            session, snapshot, scenario, past = interview_before
+            if self.debrief_saved_this_turn:
+                session, scenario, past = None, None, []
+            elif session is not None:
+                # Restore the same object so phase and turn count match history.
+                session.__dict__.update(snapshot.__dict__)
+            self.interview, self.interview_scenario, self.past_debriefs = session, scenario, past
             self.get_logger().error(f'Claude API error: {e}')
 
 

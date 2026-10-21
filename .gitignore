@@ -12,6 +12,9 @@ log/
 # Memory data -- personal conversation history and facts, not code
 memory_data/
 
+# Personal files for interview practice: resume PDF and extracted text
+data/
+
 # Model weights -- large binary files, don't belong in git
 *.pt
 *.pth
