@@ -385,6 +385,7 @@ class ClaudeBridgeNode(Node):
         self.interview = None
         self.interview_scenario = None
         self.past_debriefs = []
+        self.debrief_saved_this_turn = False
 
         # Warm up ChromaDB's embedding model now, so the first real
         # message doesn't pay the ~1.5 s model-load cost.
@@ -865,6 +866,10 @@ class ClaudeBridgeNode(Node):
                     self.close_interview('debrief turn limit reached, not saved')
             if self.interview is not None:
                 self.interview.record_user_turn()
+            # Active after bookkeeping, not at turn start: a turn whose session
+            # was just closed (auto-close or 'end interview' in the debrief) is
+            # ordinary chat again.
+            session_active = self.interview is not None
 
             self.conversation_history.append({'role': 'user', 'content': user_text})
 
@@ -917,9 +922,9 @@ class ClaudeBridgeNode(Node):
             # ---- Facts, history, publish ---------------------------------
             # Roleplay stays out of long-term memory: interviewer lines quote
             # the resume and would resurface as "similar past turns" later.
-            # A turn counts if a session was active at its start or end.
-            # Debriefs are still saved, through save_interview_debrief.
-            interview_turn = interview_before[0] is not None or self.interview is not None
+            # A turn counts if a session was active after bookkeeping or at
+            # its end. Debriefs are still saved, through save_interview_debrief.
+            interview_turn = session_active or self.interview is not None
             raw_reply = ' '.join(reply_parts)
             if interview_turn:
                 reply_text = FACT_PATTERN.sub('', raw_reply).strip()

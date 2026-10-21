@@ -173,6 +173,9 @@ class CompanyResearcher:
             worker.start()
             worker.join(self.deadline_s)
             # Tell an abandoned search not to start further paid continuations.
+            # Its in-flight call still ends within the client timeout; if the
+            # node shuts down first, a late log call may print a harmless
+            # thread exception at exit.
             stop.set()
             result, reason = box.get(
                 'outcome', (None, 'timed out after %gs' % self.deadline_s)
