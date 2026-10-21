@@ -43,11 +43,13 @@ Threads:
     Capture never waits on Whisper, so the arecord pipe is always drained.
 
 Self-hearing protection (two layers):
-    1. The XVF3800 does acoustic echo cancellation, because TTS plays
-       through the reSpeaker itself.
-    2. tts_node publishes /tts_speaking. While it's True (plus a short
-       tail), this node discards mic audio, so Tales never transcribes
-       its own voice.
+    1. The XVF3800 does acoustic echo cancellation, but only when TTS plays
+       through the reSpeaker itself. With the HDMI display speaker as the
+       output, there is no echo cancellation, and layer 2 is the only
+       protection.
+    2. tts_node publishes /tts_speaking. While it's True (plus mute_tail_s),
+       this node discards mic audio, so Tales never transcribes its own
+       voice. The tail starts after tts_node's trailing silence has played.
 
 Parameters (override with --ros-args -p name:=value):
     mic_device         : ALSA capture device, pinned by card NAME.
@@ -76,6 +78,10 @@ Parameters (override with --ros-args -p name:=value):
                          "...you know" from being treated as silence.
     log_levels         : when True, logs the room's loudness once a second.
                          Use it to pick min_rms, then turn it off.
+    mute_tail_s        : seconds the mic stays muted after Tales stops
+                         talking (default 0.4). A negative or invalid
+                         value logs a warning and uses 0.4. Write it with a
+                         decimal point: mute_tail_s:=1.0, not 1.
 
 Known limitations:
     - No wake word. Tales responds to any speech it hears, including a TV.
@@ -94,6 +100,7 @@ import subprocess   # Runs arecord
 import threading    # Capture and transcriber threads
 import time         # Monotonic clock
 
+from companion_brain.audio_timing import seconds_or_default, unmute_time
 import numpy as np                  # Audio sample math
 import webrtcvad                    # Voice activity detection
 from faster_whisper import WhisperModel  # Speech recognition
@@ -113,8 +120,9 @@ BYTES_PER_SAMPLE = 2                            # 16-bit = 2 bytes
 FRAME_BYTES = FRAME_SAMPLES * CHANNELS * BYTES_PER_SAMPLE  # 1920 bytes
 
 # How long to keep the mic muted after TTS finishes, so the tail end of
-# playback (and room echo) isn't picked up.
-MUTE_TAIL_S = 0.4
+# playback (and room echo) isn't picked up. Without echo cancellation (HDMI
+# output) this matters more, so it is the mute_tail_s parameter.
+DEFAULT_MUTE_TAIL_S = 0.4
 
 # ---- Completeness check -------------------------------------------------
 # Words that almost never end a finished thought in speech. If the
@@ -187,6 +195,7 @@ class STTNode(Node):
         self.declare_parameter('min_rms', 0)
         self.declare_parameter('continue_rms_ratio', 0.5)
         self.declare_parameter('log_levels', False)
+        self.declare_parameter('mute_tail_s', DEFAULT_MUTE_TAIL_S)
 
         self.mic_device = self.get_parameter('mic_device').value
         self.mic_channel = self.get_parameter('mic_channel').value
@@ -198,6 +207,11 @@ class STTNode(Node):
         check_tail_s = self.get_parameter('check_tail_s').value
         min_utterance_ms = self.get_parameter('min_utterance_ms').value
         self.min_rms = self.get_parameter('min_rms').value
+        self.mute_tail_s, warning = seconds_or_default(
+            self.get_parameter('mute_tail_s').value, 'mute_tail_s', DEFAULT_MUTE_TAIL_S
+        )
+        if warning:
+            self.get_logger().warn(warning)
         ratio = self.get_parameter('continue_rms_ratio').value
         self.log_levels = self.get_parameter('log_levels').value
 
@@ -258,7 +272,8 @@ class STTNode(Node):
 
         self.get_logger().info(
             f'STT node ready. Listening on {self.mic_device} '
-            f'(check at {soft_ms} ms pause, always end at {hard_ms} ms)'
+            f'(check at {soft_ms} ms pause, always end at {hard_ms} ms, '
+            f'mute tail {self.mute_tail_s:.3f}s)'
         )
 
     # ------------------------------------------------------------------------
@@ -271,7 +286,7 @@ class STTNode(Node):
             self.speaking = True
         else:
             self.speaking = False
-            self.unmute_at = time.monotonic() + MUTE_TAIL_S
+            self.unmute_at = unmute_time(time.monotonic(), self.mute_tail_s)
 
     def is_muted(self):
         """True when mic audio should be ignored."""

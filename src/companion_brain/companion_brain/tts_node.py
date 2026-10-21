@@ -3,7 +3,9 @@ tts_node.py - Text-to-speech output node for Tales.
 
 What it does:
     Listens on /companion_speech for sentences from claude_bridge_node,
-    turns each one into speech, and plays it through the reSpeaker.
+    turns each one into speech, and plays it on audio_device. The HDMI
+    display speaker is the primary output (see plan.md's run commands); the
+    reSpeaker also works.
 
 Data flow:
     claude_bridge_node --(/companion_speech: String, one per sentence)
@@ -30,11 +32,16 @@ Pipeline (two threads, so there are no gaps between sentences):
     ROS callback     : queues incoming text immediately, never blocks.
     synth thread     : text -> engine -> sox -> WAV file, queued for playback.
     playback thread  : plays WAV files in order.
+    Each sentence is its own aplay call, so tail_pad_s adds that much
+    silence between consecutive sentences.
 
 Audio steps:
     1. The engine writes a mono WAV (Piper 22050 Hz, Kokoro 24000 Hz).
     2. sox converts to 48 kHz stereo, the only format the reSpeaker plays
-       correctly. -G (guard) prevents clipping during conversion.
+       correctly. -G (guard) prevents clipping during conversion. sox also
+       appends tail_pad_s of silence: the HDMI display speaker replays its
+       final buffer when playback stops abruptly, which made the last word
+       of every sentence stutter.
     3. aplay sends it straight to the reSpeaker. PulseAudio is disabled,
        so the node gets exclusive, direct access to the device.
 
@@ -55,6 +62,10 @@ Parameters (override with --ros-args -p name:=value):
     kokoro_speed       : 1.0 is normal. 0.9 is calmer, 1.1 is brisker.
     kokoro_provider    : 'cuda' (GPU) or 'cpu'.
     kokoro_gpu_mem_mb  : cap on Kokoro's GPU memory pool (shared 8 GB).
+    tail_pad_s         : seconds of silence appended to each sentence
+                         (default 0.3). 0.0 disables it. A negative or
+                         invalid value logs a warning and uses 0.3. Write
+                         it with a decimal point: tail_pad_s:=1.0, not 1.
 """
 
 import json        # Worker protocol
@@ -67,6 +78,7 @@ import threading   # Synth and playback threads
 import time        # Synthesis timing
 import wave        # WAV writer used by Piper
 
+from companion_brain.audio_timing import seconds_or_default, sox_convert_cmd
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
@@ -75,6 +87,10 @@ KOKORO_DIR = os.path.expanduser('~/companion_ws/voices/kokoro')
 
 # How long to wait for the Kokoro worker to load and warm up.
 WORKER_START_TIMEOUT_S = 60
+
+# Trailing silence per sentence, so sinks that replay their last buffer on
+# an abrupt stop (the HDMI display speaker) don't stutter the last word.
+DEFAULT_TAIL_PAD_S = 0.3
 
 
 class EngineError(Exception):
@@ -213,10 +229,16 @@ class TTSNode(Node):
         self.declare_parameter('kokoro_speed', 1.0)
         self.declare_parameter('kokoro_provider', 'cuda')
         self.declare_parameter('kokoro_gpu_mem_mb', 1024)
+        self.declare_parameter('tail_pad_s', DEFAULT_TAIL_PAD_S)
 
         p = lambda name: self.get_parameter(name).value  # noqa: E731
         self.audio_device = p('audio_device')
         self.piper_voice_path = p('voice_model')
+        self.tail_pad_s, warning = seconds_or_default(
+            p('tail_pad_s'), 'tail_pad_s', DEFAULT_TAIL_PAD_S
+        )
+        if warning:
+            self.get_logger().warn(warning)
 
         # ---- Load the engine ------------------------------------------------
         self.engine = None
@@ -258,7 +280,8 @@ class TTSNode(Node):
         threading.Thread(target=self.play_loop, daemon=True).start()
 
         self.get_logger().info(
-            f'TTS node ready. Engine: {self.engine.name}, output: {self.audio_device}'
+            f'TTS node ready. Engine: {self.engine.name}, output: {self.audio_device}, '
+            f'tail pad: {self.tail_pad_s:.3f}s'
         )
 
     # ------------------------------------------------------------------------
@@ -316,9 +339,9 @@ class TTSNode(Node):
                     f'[{self.engine.name}] {synth_s:.2f}s synth: {text}'
                 )
 
-                # Convert to 48 kHz stereo for the reSpeaker.
+                # Convert to 48 kHz stereo, with trailing silence.
                 subprocess.run(
-                    ['sox', '-G', raw_path, '-r', '48000', '-c', '2', out_path],
+                    sox_convert_cmd(raw_path, out_path, self.tail_pad_s),
                     check=True,
                 )
                 self.play_queue.put((out_path, tmpdir))
