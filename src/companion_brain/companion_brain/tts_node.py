@@ -37,12 +37,12 @@ Pipeline (two threads, so there are no gaps between sentences):
 
 Audio steps:
     1. The engine writes a mono WAV (Piper 22050 Hz, Kokoro 24000 Hz).
-    2. sox converts to 48 kHz stereo, the only format the reSpeaker plays
+    2. sox converts to 48 kHz stereo, the format the output devices play
        correctly. -G (guard) prevents clipping during conversion. sox also
        appends tail_pad_s of silence: the HDMI display speaker replays its
        final buffer when playback stops abruptly, which made the last word
        of every sentence stutter.
-    3. aplay sends it straight to the reSpeaker. PulseAudio is disabled,
+    3. aplay sends it straight to audio_device. PulseAudio is disabled,
        so the node gets exclusive, direct access to the device.
 
 Publishes:
@@ -63,9 +63,10 @@ Parameters (override with --ros-args -p name:=value):
     kokoro_provider    : 'cuda' (GPU) or 'cpu'.
     kokoro_gpu_mem_mb  : cap on Kokoro's GPU memory pool (shared 8 GB).
     tail_pad_s         : seconds of silence appended to each sentence
-                         (default 0.3). 0.0 disables it. A negative or
-                         invalid value logs a warning and uses 0.3. Write
-                         it with a decimal point: tail_pad_s:=1.0, not 1.
+                         (default 0.3). 0.0 disables it. A negative, NaN,
+                         or infinite value logs a warning and uses 0.3.
+                         Write it with a decimal point (tail_pad_s:=1.0,
+                         not 1): ROS rejects an int at startup.
 """
 
 import json        # Worker protocol

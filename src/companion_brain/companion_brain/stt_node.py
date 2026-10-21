@@ -79,9 +79,10 @@ Parameters (override with --ros-args -p name:=value):
     log_levels         : when True, logs the room's loudness once a second.
                          Use it to pick min_rms, then turn it off.
     mute_tail_s        : seconds the mic stays muted after Tales stops
-                         talking (default 0.4). A negative or invalid
-                         value logs a warning and uses 0.4. Write it with a
-                         decimal point: mute_tail_s:=1.0, not 1.
+                         talking (default 0.4). A negative, NaN, or
+                         infinite value logs a warning and uses 0.4. Write
+                         it with a decimal point (mute_tail_s:=1.0, not 1):
+                         ROS rejects an int at startup.
 
 Known limitations:
     - No wake word. Tales responds to any speech it hears, including a TV.
