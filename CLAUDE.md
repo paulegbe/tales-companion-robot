@@ -41,6 +41,17 @@ Owner and tech lead: Akama. He approves plans and merges PRs. Nothing merges wit
 - Run from the repo root: `.venv/bin/python -m pytest src/companion_brain/test -m "not ros" -q`
 - Without ROS, the ament linter tests (flake8, pep257, copyright) are reported as skipped.
   They run under `colcon test` on the Jetson.
+- The Jetson runs apt pytest 6.2.5 with anthropic's dependencies (including anyio) installed.
+  Write tests that work on pytest 6.2.5 too. `setup.cfg` disables the anyio plugin
+  (`-p no:anyio`), which crashes pytest 6.2.5.
+- On the Jetson, run the ament linter tests with `colcon test --packages-select companion_brain`.
+  To run them with plain pytest, run from the package directory, because ament flake8 and
+  pep257 scan the current directory: `cd src/companion_brain && python3 -m pytest test`.
+- ament flake8 and pep257 cannot run on the Mac. Until CI covers them, follow their rules by
+  hand in every new or changed file: max line length 99, single quotes, google import order,
+  docstring summaries in the imperative ending in a period, and multi-line docstrings with
+  the summary on the second line (D213): `"""` on its own line, then the summary. Separately,
+  project style requires a docstring on every module and public function.
 
 ## Git
 - Never commit to `main`. Branch per issue: `issue-<number>-<short-slug>`.
